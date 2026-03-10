@@ -4,4 +4,8 @@ __pycache__/
 *.pt
 *.ckpt
 *.pkl
+*.o
 .DS_Store
+outputs/
+data/
+external/
