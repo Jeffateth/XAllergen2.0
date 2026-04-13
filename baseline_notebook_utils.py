@@ -103,7 +103,8 @@ class AttentionPooling(nn.Module):
     def forward(
         self, residue_embeddings: torch.Tensor, attention_mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        mask = attention_mask.bool()
+        # Expand mask to match batch dimension (handles IG's 50-step batching)
+        mask = attention_mask.bool().expand(residue_embeddings.shape[0], -1)
         scores = self.score(residue_embeddings).squeeze(-1)
         scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
         weights = torch.softmax(scores, dim=-1)
@@ -148,10 +149,20 @@ class FrozenESMAllergenClassifier(nn.Module):
     def forward_from_inputs_embeds(
         self, inputs_embeds: torch.Tensor, attention_mask: torch.Tensor
     ) -> dict:
-        residue_embeddings = self.backbone(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-        ).last_hidden_state
+        # ESM-2 token_dropout uses input_ids to locate mask tokens; when we
+        # pass inputs_embeds directly (Captum IG path), input_ids is None so
+        # (None == mask_token_id) → Python False → False.unsqueeze(-1) →
+        # AttributeError. Token dropout is irrelevant here (we already have
+        # the embeddings), so disable it for this call.
+        token_dropout_backup = self.backbone.embeddings.token_dropout
+        self.backbone.embeddings.token_dropout = False
+        try:
+            residue_embeddings = self.backbone(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+            ).last_hidden_state
+        finally:
+            self.backbone.embeddings.token_dropout = token_dropout_backup
         return self.forward_from_residue_embeddings(residue_embeddings, attention_mask)
 
 
@@ -176,7 +187,7 @@ def load_baseline_checkpoint(
     hidden_dim: int = HIDDEN_DIM,
     dropout: float = DROPOUT,
 ) -> tuple[FrozenESMAllergenClassifier, dict]:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     architecture = checkpoint.get(
         "architecture_hyperparameters",
         {"hidden_dim": hidden_dim, "dropout": dropout},
@@ -186,7 +197,19 @@ def load_baseline_checkpoint(
         hidden_dim=architecture.get("hidden_dim", hidden_dim),
         dropout=architecture.get("dropout", dropout),
     ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    incompatible = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    if incompatible.missing_keys:
+        non_positional = [k for k in incompatible.missing_keys if "position_embeddings" not in k]
+        if non_positional:
+            raise RuntimeError(
+                "Unexpected missing keys in checkpoint:\n"
+                + "\n".join(f"  {k}" for k in non_positional)
+            )
+    if incompatible.unexpected_keys:
+        raise RuntimeError(
+            "Unexpected extra keys in checkpoint:\n"
+            + "\n".join(f"  {k}" for k in incompatible.unexpected_keys)
+        )
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
@@ -220,23 +243,23 @@ def compute_integrated_gradients(
     from captum.attr import IntegratedGradients
 
     encodings = tokenize_sequence(tokenizer, sequence, device)
+    attention_mask = encodings["attention_mask"]  # shape: (1, seq_len), dtype: long
+
     input_embeds = model.backbone.get_input_embeddings()(encodings["input_ids"]).detach()
     baseline = torch.zeros_like(input_embeds)
 
-    def ig_forward(inputs_embeds: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def ig_forward(inputs_embeds: torch.Tensor) -> torch.Tensor:
         return model.forward_from_inputs_embeds(inputs_embeds, attention_mask)["logits"]
 
     attributions = IntegratedGradients(ig_forward).attribute(
         inputs=input_embeds,
         baselines=baseline,
-        additional_forward_args=(encodings["attention_mask"],),
         n_steps=steps,
     )
     importance = attributions.abs().sum(dim=-1).squeeze(0).detach().cpu().numpy()
-    valid_length = int(encodings["attention_mask"].sum().item())
+    valid_length = int(attention_mask.sum().item())
     importance = importance[:valid_length]
     return normalize_scores(importance) if normalize else importance
-
 
 def mean_metric_dicts(metric_rows: list[dict]) -> dict:
     return {
