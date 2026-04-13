@@ -32,18 +32,14 @@ def resolve_hf_model_source(model_name: str = HF_MODEL_NAME) -> str:
         return override
 
     repo_dir = Path.home() / ".cache" / "huggingface" / "hub" / f"models--{model_name.replace('/', '--')}"
-    ref_path = repo_dir / "refs" / "main"
-    if ref_path.exists():
-        revision = ref_path.read_text().strip()
-        snapshot_dir = repo_dir / "snapshots" / revision
-        if snapshot_dir.exists():
-            return str(snapshot_dir)
-
     snapshots_dir = repo_dir / "snapshots"
     if snapshots_dir.exists():
-        snapshots = sorted(path for path in snapshots_dir.iterdir() if path.is_dir())
-        if snapshots:
-            return str(snapshots[-1])
+        for snapshot in sorted(snapshots_dir.iterdir(), reverse=True):
+            if snapshot.is_dir() and any(
+                list(snapshot.glob(pat))
+                for pat in ("*.safetensors", "*.bin")
+            ):
+                return str(snapshot)
 
     return model_name
 
