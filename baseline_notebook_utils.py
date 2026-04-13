@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from captum.attr import IntegratedGradients
 from torch import nn
 from transformers import AutoTokenizer, EsmModel
 
@@ -67,14 +66,26 @@ def seed_everything(seed: int = RANDOM_STATE) -> None:
 
 
 def detect_device() -> str:
-    return "mps" if torch.backends.mps.is_available() else "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def print_runtime_context(device: str, project_root: Path) -> None:
-    print("RUN_TARGET: local")
+    run_target = os.environ.get("XALLERGEN_RUN_TARGET", "local")
+    print(f"RUN_TARGET: {run_target}")
     print(f"Device: {device}")
     print(f"Project root: {project_root}")
-    if device == "mps":
+    if device == "cuda":
+        print("GPU configuration:")
+        print(f"  backend: CUDA")
+        print(f"  CUDA available: {torch.cuda.is_available()}")
+        print(f"  GPU count: {torch.cuda.device_count()}")
+        if torch.cuda.is_available():
+            print(f"  Current device: {torch.cuda.get_device_name(torch.cuda.current_device())}")
+    elif device == "mps":
         print("GPU configuration:")
         print("  backend: Apple Metal Performance Shaders (MPS)")
         print(f"  built with MPS: {torch.backends.mps.is_built()}")
@@ -210,6 +221,8 @@ def compute_integrated_gradients(
     steps: int = IG_STEPS,
     normalize: bool = False,
 ) -> np.ndarray:
+    from captum.attr import IntegratedGradients
+
     encodings = tokenize_sequence(tokenizer, sequence, device)
     input_embeds = model.backbone.get_input_embeddings()(encodings["input_ids"]).detach()
     baseline = torch.zeros_like(input_embeds)
