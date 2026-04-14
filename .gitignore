@@ -1,10 +1,12 @@
 .venv/
+.matplotlib/
 __pycache__/
 .ipynb_checkpoints/
 *.pt
 *.ckpt
 *.pkl
 *.o
+*.html
 .DS_Store
 outputs/
 data/
