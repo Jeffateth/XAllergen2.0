@@ -9,5 +9,4 @@ __pycache__/
 *.html
 .DS_Store
 outputs/
-data/
 external/
