@@ -166,6 +166,35 @@ class FrozenESMAllergenClassifier(nn.Module):
         return self.forward_from_residue_embeddings(residue_embeddings, attention_mask)
 
 
+class FrozenESMAllergenMTLClassifier(FrozenESMAllergenClassifier):
+    def __init__(
+        self,
+        model_name: str,
+        hidden_dim: int = HIDDEN_DIM,
+        dropout: float = DROPOUT,
+        epitope_hidden_dim: int = HIDDEN_DIM,
+    ):
+        super().__init__(model_name, hidden_dim=hidden_dim, dropout=dropout)
+        embed_dim = self.backbone.config.hidden_size
+        self.epitope_head = nn.Sequential(
+            nn.Linear(embed_dim, epitope_hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(epitope_hidden_dim, 1),
+        )
+
+    def forward_from_residue_embeddings(
+        self, residue_embeddings: torch.Tensor, attention_mask: torch.Tensor
+    ) -> dict:
+        outputs = super().forward_from_residue_embeddings(residue_embeddings, attention_mask)
+        residue_logits = self.epitope_head(residue_embeddings).squeeze(-1)
+        residue_mask = attention_mask.bool().expand(residue_logits.shape[0], -1)
+        residue_logits = residue_logits.masked_fill(~residue_mask, torch.finfo(residue_logits.dtype).min)
+        outputs["residue_logits"] = residue_logits
+        outputs["residue_probs"] = torch.sigmoid(residue_logits) * residue_mask
+        return outputs
+
+
 def tokenize_sequence(tokenizer, sequence: str, device: str) -> dict:
     encodings = tokenizer(
         sequence,
@@ -216,6 +245,64 @@ def load_baseline_checkpoint(
     return model, checkpoint
 
 
+def load_mtl_checkpoint(
+    checkpoint_path: Path,
+    device: str,
+    model_name: str = HF_MODEL_NAME,
+    hidden_dim: int = HIDDEN_DIM,
+    dropout: float = DROPOUT,
+    epitope_hidden_dim: int = HIDDEN_DIM,
+) -> tuple[FrozenESMAllergenMTLClassifier, dict]:
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    architecture = checkpoint.get(
+        "architecture_hyperparameters",
+        {
+            "hidden_dim": hidden_dim,
+            "dropout": dropout,
+            "epitope_hidden_dim": epitope_hidden_dim,
+        },
+    )
+    model = FrozenESMAllergenMTLClassifier(
+        model_name,
+        hidden_dim=architecture.get("hidden_dim", hidden_dim),
+        dropout=architecture.get("dropout", dropout),
+        epitope_hidden_dim=architecture.get("epitope_hidden_dim", epitope_hidden_dim),
+    ).to(device)
+    incompatible = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    if incompatible.missing_keys:
+        non_positional = [k for k in incompatible.missing_keys if "position_embeddings" not in k]
+        if non_positional:
+            raise RuntimeError(
+                "Unexpected missing keys in checkpoint:\n"
+                + "\n".join(f"  {k}" for k in non_positional)
+            )
+    if incompatible.unexpected_keys:
+        raise RuntimeError(
+            "Unexpected extra keys in checkpoint:\n"
+            + "\n".join(f"  {k}" for k in incompatible.unexpected_keys)
+        )
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
+    return model, checkpoint
+
+
+def parse_epitope_label(sequence: str, epitope_start: str, epitope_end: str) -> np.ndarray:
+    labels = np.zeros(len(sequence), dtype=np.float32)
+    starts = [int(s) for s in str(epitope_start).split(";") if str(s).strip()]
+    ends = [int(e) for e in str(epitope_end).split(";") if str(e).strip()]
+    if len(starts) != len(ends):
+        raise ValueError(
+            f"Mismatched interval counts: {len(starts)} starts vs {len(ends)} ends"
+        )
+    for start, end in zip(starts, ends):
+        left = max(start - 1, 0)
+        right = min(end, len(sequence))
+        if left < right:
+            labels[left:right] = 1.0
+    return labels
+
+
 def normalize_scores(scores: np.ndarray) -> np.ndarray:
     scores = np.asarray(scores, dtype=np.float64)
     scores = np.maximum(scores, 0.0)
@@ -230,6 +317,17 @@ def compute_attention_weights(model, tokenizer, sequence: str, device: str) -> n
     weights = outputs["attention_weights"].squeeze(0).detach().cpu().numpy()
     valid_length = int(encodings["attention_mask"].sum().item())
     return weights[:valid_length]
+
+
+def compute_residue_probabilities(model, tokenizer, sequence: str, device: str) -> np.ndarray:
+    encodings = tokenize_sequence(tokenizer, sequence, device)
+    with torch.no_grad():
+        outputs = model(encodings["input_ids"], encodings["attention_mask"])
+    if "residue_probs" not in outputs:
+        raise ValueError("Model does not expose residue_probs. Use FrozenESMAllergenMTLClassifier.")
+    residue_probs = outputs["residue_probs"].squeeze(0).detach().cpu().numpy()
+    valid_length = int(encodings["attention_mask"].sum().item())
+    return residue_probs[:valid_length]
 
 
 def compute_integrated_gradients(
