@@ -245,6 +245,68 @@ def load_baseline_checkpoint(
     return model, checkpoint
 
 
+def initialize_mtl_from_baseline_checkpoint(
+    checkpoint_path: Path,
+    device: str,
+    model_name: str = HF_MODEL_NAME,
+    hidden_dim: int = HIDDEN_DIM,
+    dropout: float = DROPOUT,
+    epitope_hidden_dim: int = HIDDEN_DIM,
+) -> tuple[FrozenESMAllergenMTLClassifier, dict]:
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    architecture = checkpoint.get(
+        "architecture_hyperparameters",
+        {"hidden_dim": hidden_dim, "dropout": dropout},
+    )
+    model = FrozenESMAllergenMTLClassifier(
+        model_name,
+        hidden_dim=architecture.get("hidden_dim", hidden_dim),
+        dropout=architecture.get("dropout", dropout),
+        epitope_hidden_dim=epitope_hidden_dim,
+    ).to(device)
+    incompatible = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+
+    missing_keys = [k for k in incompatible.missing_keys if "position_embeddings" not in k]
+    epitope_head_missing_keys = [k for k in missing_keys if k.startswith("epitope_head.")]
+    unexpected_missing_keys = [k for k in missing_keys if not k.startswith("epitope_head.")]
+    if unexpected_missing_keys:
+        raise RuntimeError(
+            "Unexpected missing keys when initializing MTL model from baseline checkpoint:\n"
+            + "\n".join(f"  {k}" for k in unexpected_missing_keys)
+        )
+    if incompatible.unexpected_keys:
+        raise RuntimeError(
+            "Unexpected extra keys when initializing MTL model from baseline checkpoint:\n"
+            + "\n".join(f"  {k}" for k in incompatible.unexpected_keys)
+        )
+
+    loaded_keys = sorted(
+        key for key in checkpoint["model_state_dict"].keys() if key in model.state_dict()
+    )
+    print(f"Loaded baseline checkpoint: {checkpoint_path}")
+    print("Loaded shared keys:")
+    for key in loaded_keys:
+        print(f"  {key}")
+    print("Missing keys:")
+    if epitope_head_missing_keys:
+        for key in epitope_head_missing_keys:
+            print(f"  {key}")
+    else:
+        print("  <none>")
+    print("Unexpected keys:")
+    if incompatible.unexpected_keys:
+        for key in incompatible.unexpected_keys:
+            print(f"  {key}")
+    else:
+        print("  <none>")
+    if epitope_head_missing_keys:
+        print("Epitope head remains newly initialized:")
+        for key in epitope_head_missing_keys:
+            print(f"  {key}")
+
+    return model, checkpoint
+
+
 def load_mtl_checkpoint(
     checkpoint_path: Path,
     device: str,
