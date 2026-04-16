@@ -1,0 +1,4 @@
+method,auroc_mean_baseline,auroc_sd_baseline,auprc_mean_baseline,auprc_sd_baseline,precision_at_k_mean_baseline,precision_at_k_sd_baseline,n_proteins_baseline,auroc_mean_mtl,auroc_sd_mtl,auprc_mean_mtl,auprc_sd_mtl,precision_at_k_mean_mtl,precision_at_k_sd_mtl,n_proteins_mtl,delta_auroc_mean,delta_auprc_mean,delta_precision_at_k_mean
+attention_weights,0.4114,0.1256,0.317,0.2395,0.2846,0.2663,69,0.4127,0.1213,0.3178,0.24,0.2916,0.2657,69,0.0013,0.0008,0.007
+integrated_gradients,0.4404,0.1476,0.3376,0.2436,0.3187,0.2719,69,0.4363,0.1612,0.3348,0.2423,0.3104,0.2786,69,-0.0041,-0.0028,-0.0083
+random_mean,0.4991,0.0063,0.3597,0.2477,0.3436,0.2512,69,0.4991,0.0063,0.3597,0.2477,0.3436,0.2512,69,0.0,0.0,0.0

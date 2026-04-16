@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import gc
 import json
 import math
@@ -1047,43 +1046,85 @@ def run_probe_suite(
     n_random_draws: int,
     ig_internal_batch_size: int,
     model_name: str = HF_MODEL_NAME,
+    resume: bool = True,
+    save_every: int = 1,
 ) -> dict[str, pd.DataFrame]:
     ig_probe_device = device
     rng = np.random.default_rng(RANDOM_STATE)
+    expected_mtl_methods = {"residue_head", "attention_weights", "integrated_gradients", "random_mean"}
+    expected_baseline_methods = {"attention_weights", "integrated_gradients", "random_mean"}
     probe_rows = []
     baseline_probe_rows = []
 
-    ig_model = copy.deepcopy(model).to(ig_probe_device)
+    ig_model = model.to(ig_probe_device)
     ig_model.eval()
     baseline_model, _ = load_baseline_checkpoint(
         baseline_checkpoint_path,
-        device,
+        ig_probe_device,
         model_name=model_name,
         hidden_dim=hidden_dim,
         dropout=dropout,
     )
-    baseline_ig_model = copy.deepcopy(baseline_model).to(ig_probe_device)
+    baseline_ig_model = baseline_model
     baseline_ig_model.eval()
+
+    completed_accessions: set[str] = set()
+    if resume:
+        if output_paths.probe_rows_path.exists():
+            existing_probe_df = pd.read_csv(output_paths.probe_rows_path)
+            probe_rows = existing_probe_df.to_dict("records")
+            completed_accessions.update(
+                accession
+                for accession, method_count in existing_probe_df.groupby("accession")["method"].nunique().items()
+                if method_count >= len(expected_mtl_methods)
+            )
+            print(
+                f"Loaded {len(existing_probe_df)} existing MTL probe rows from "
+                f"{output_paths.probe_rows_path}"
+            )
+        if output_paths.baseline_probe_rows_path.exists():
+            existing_baseline_probe_df = pd.read_csv(output_paths.baseline_probe_rows_path)
+            baseline_probe_rows = existing_baseline_probe_df.to_dict("records")
+            completed_accessions &= {
+                accession
+                for accession, method_count in existing_baseline_probe_df.groupby("accession")["method"].nunique().items()
+                if method_count >= len(expected_baseline_methods)
+            } if completed_accessions else {
+                accession
+                for accession, method_count in existing_baseline_probe_df.groupby("accession")["method"].nunique().items()
+                if method_count >= len(expected_baseline_methods)
+            }
+            print(
+                f"Loaded {len(existing_baseline_probe_df)} existing baseline probe rows from "
+                f"{output_paths.baseline_probe_rows_path}"
+            )
 
     print(f"Integrated Gradients device: {ig_probe_device}")
     print(f"IG_STEPS: {ig_steps}")
     print(f"IG internal_batch_size: {ig_internal_batch_size}")
+    if completed_accessions:
+        print(f"Resuming probe run: skipping {len(completed_accessions)} completed accessions")
 
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+    processed_since_save = 0
     for _, row in tqdm(epitope_probe_df.iterrows(), total=len(epitope_probe_df), desc="Probing splitB"):
+        accession = str(row["accession"])
+        if accession in completed_accessions:
+            continue
+
         sequence = row["sequence"]
         epitope_labels = row["epitope_label"]
         base = {
-            "accession": row["accession"],
+            "accession": accession,
             "seq_len": int(row["seq_len"]),
             "epitope_density": float(row["epitope_density"]),
             "n_epitope_residues": int(row["n_epitope_residues"]),
         }
 
-        residue_scores = compute_residue_probabilities(model, tokenizer, sequence, device)
+        residue_scores = compute_residue_probabilities(ig_model, tokenizer, sequence, ig_probe_device)
         probe_rows.append(
             {
                 **base,
@@ -1093,7 +1134,7 @@ def run_probe_suite(
             }
         )
 
-        attention_scores = compute_attention_weights(model, tokenizer, sequence, device)
+        attention_scores = compute_attention_weights(ig_model, tokenizer, sequence, ig_probe_device)
         probe_rows.append(
             {
                 **base,
@@ -1103,7 +1144,9 @@ def run_probe_suite(
             }
         )
 
-        baseline_attention_scores = compute_attention_weights(baseline_model, tokenizer, sequence, device)
+        baseline_attention_scores = compute_attention_weights(
+            baseline_model, tokenizer, sequence, ig_probe_device
+        )
         baseline_probe_rows.append(
             {
                 **base,
@@ -1171,6 +1214,16 @@ def run_probe_suite(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+        processed_since_save += 1
+        if save_every > 0 and processed_since_save >= save_every:
+            probe_df = pd.DataFrame(probe_rows)
+            baseline_probe_df = pd.DataFrame(baseline_probe_rows)
+            combined_probe_df = pd.concat([baseline_probe_df, probe_df], ignore_index=True)
+            probe_df.to_csv(output_paths.probe_rows_path, index=False)
+            baseline_probe_df.to_csv(output_paths.baseline_probe_rows_path, index=False)
+            combined_probe_df.to_csv(output_paths.combined_probe_rows_path, index=False)
+            processed_since_save = 0
 
     del ig_model
     del baseline_ig_model
@@ -1351,6 +1404,7 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
 
 def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: Path, auprc_out_path: Path) -> None:
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
     from statsmodels.nonparametric.smoothers_lowess import lowess
 
     scatter_methods = ["attention_weights", "integrated_gradients", "random_mean", "residue_head"]
@@ -1398,7 +1452,42 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
         ax.set_xlabel("Epitope Density (fraction of residues)", fontsize=12)
         ax.set_ylabel(metric_label, fontsize=12)
         ax.set_title(f"{metric_label} vs. Epitope Density", fontsize=13)
-        ax.legend(fontsize=8, ncol=2)
+
+        method_handles = [
+            Line2D([0], [0], color=PALETTE[method], linewidth=2.5, label=METHOD_XLABELS[method].replace("\n", " "))
+            for method in scatter_methods
+        ]
+        family_handles = [
+            Line2D(
+                [0],
+                [0],
+                color="dimgray",
+                linewidth=2.0,
+                linestyle=FAMILY_LINESTYLE[family],
+                marker=FAMILY_MARKER[family],
+                markersize=6,
+                label=f"{family} ({'dashed' if FAMILY_LINESTYLE[family] == '--' else 'solid'})",
+            )
+            for family in FAMILY_ORDER
+        ]
+
+        method_legend = ax.legend(
+            handles=method_handles,
+            title="Method / Color",
+            fontsize=8,
+            title_fontsize=9,
+            loc="upper left",
+            bbox_to_anchor=(0.01, 0.99),
+        )
+        ax.add_artist(method_legend)
+        ax.legend(
+            handles=family_handles,
+            title="Model / Style",
+            fontsize=8,
+            title_fontsize=9,
+            loc="upper left",
+            bbox_to_anchor=(0.42, 0.99),
+        )
         plt.tight_layout()
         plt.savefig(out_path, dpi=150, bbox_inches="tight")
         plt.show()
