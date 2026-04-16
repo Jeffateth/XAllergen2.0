@@ -209,6 +209,151 @@ def tokenize_sequence(tokenizer, sequence: str, device: str) -> dict:
     }
 
 
+def _find_final_backbone_encoder_block(backbone: nn.Module) -> tuple[str, nn.Module]:
+    encoder = getattr(backbone, "encoder", None)
+    if encoder is not None:
+        for layer_attr in ("layer", "layers"):
+            layer_container = getattr(encoder, layer_attr, None)
+            if isinstance(layer_container, nn.ModuleList) and len(layer_container) > 0:
+                return f"encoder.{layer_attr}.{len(layer_container) - 1}", layer_container[-1]
+
+    candidate_names = [
+        name
+        for name, module in backbone.named_modules()
+        if isinstance(module, nn.ModuleList)
+        and len(module) > 0
+        and ("encoder" in name)
+        and name.endswith(("layer", "layers"))
+    ]
+    for name in sorted(candidate_names):
+        module_list = dict(backbone.named_modules())[name]
+        return f"{name}.{len(module_list) - 1}", module_list[-1]
+
+    raise RuntimeError(
+        "Could not locate the final ESM encoder block inside model.backbone. "
+        "Expected an encoder layer ModuleList such as encoder.layer or encoder.layers."
+    )
+
+
+def _final_block_parameter_names(backbone: nn.Module, final_block_name: str) -> set[str]:
+    prefix = f"{final_block_name}."
+    return {
+        name
+        for name, _ in backbone.named_parameters()
+        if name == final_block_name or name.startswith(prefix)
+    }
+
+
+def _compact_backbone_prefix(name: str) -> str:
+    parts = name.split(".")
+    if len(parts) >= 3 and parts[0] == "encoder" and parts[1] in {"layer", "layers"}:
+        return ".".join(parts[:3])
+    if len(parts) >= 4 and parts[0] == "esm" and parts[1] == "encoder" and parts[2] in {"layer", "layers"}:
+        return ".".join(parts[:4])
+    return ".".join(parts[: min(len(parts), 3)])
+
+
+def configure_backbone_trainability(
+    model: nn.Module,
+    backbone_train_mode: str,
+) -> dict[str, object]:
+    if not hasattr(model, "backbone"):
+        raise AttributeError("Model does not expose a `backbone` module.")
+
+    backbone = model.backbone
+    for param in backbone.parameters():
+        param.requires_grad = False
+
+    final_block_name = None
+    if backbone_train_mode == "top1_unfrozen":
+        final_block_name, final_block = _find_final_backbone_encoder_block(backbone)
+        for param in final_block.parameters():
+            param.requires_grad = True
+    elif backbone_train_mode != "frozen":
+        raise ValueError(
+            f"Unsupported backbone_train_mode={backbone_train_mode!r}. "
+            "Supported modes: 'frozen', 'top1_unfrozen'."
+        )
+
+    backbone_named_params = list(backbone.named_parameters())
+    total_backbone_params = sum(param.numel() for _, param in backbone_named_params)
+    trainable_backbone = [
+        (name, param) for name, param in backbone_named_params if param.requires_grad
+    ]
+    trainable_backbone_params = sum(param.numel() for _, param in trainable_backbone)
+    trainable_pct = (
+        100.0 * trainable_backbone_params / total_backbone_params if total_backbone_params else 0.0
+    )
+    trainable_prefixes = sorted(
+        {f"model.backbone.{_compact_backbone_prefix(name)}" for name, _ in trainable_backbone}
+    )
+
+    print("Backbone trainability summary:")
+    print(f"  mode: {backbone_train_mode}")
+    print(f"  total backbone params: {total_backbone_params:,}")
+    print(f"  trainable backbone params: {trainable_backbone_params:,}")
+    print(f"  percent trainable backbone: {trainable_pct:.2f}%")
+    print("  trainable backbone submodules:")
+    if trainable_prefixes:
+        for prefix in trainable_prefixes:
+            print(f"    {prefix}")
+    else:
+        print("    <none>")
+    if final_block_name is not None:
+        print(f"  detected final encoder block: model.backbone.{final_block_name}")
+
+    return {
+        "mode": backbone_train_mode,
+        "final_block_name": final_block_name,
+        "final_block_path": (
+            f"model.backbone.{final_block_name}" if final_block_name is not None else None
+        ),
+        "total_backbone_params": total_backbone_params,
+        "trainable_backbone_params": trainable_backbone_params,
+        "trainable_backbone_pct": trainable_pct,
+        "trainable_backbone_prefixes": trainable_prefixes,
+    }
+
+
+def assert_backbone_trainability_mode(
+    model: nn.Module,
+    backbone_train_mode: str,
+) -> dict[str, object]:
+    if not hasattr(model, "backbone"):
+        raise AttributeError("Model does not expose a `backbone` module.")
+
+    backbone = model.backbone
+    trainable_names = {
+        name for name, param in backbone.named_parameters() if param.requires_grad
+    }
+
+    if backbone_train_mode == "frozen":
+        assert not trainable_names, "Expected all backbone parameters to remain frozen."
+        return {"final_block_path": None, "trainable_parameter_names": sorted(trainable_names)}
+
+    if backbone_train_mode != "top1_unfrozen":
+        raise ValueError(
+            f"Unsupported backbone_train_mode={backbone_train_mode!r}. "
+            "Supported modes: 'frozen', 'top1_unfrozen'."
+        )
+
+    final_block_name, _ = _find_final_backbone_encoder_block(backbone)
+    expected_trainable_names = _final_block_parameter_names(backbone, final_block_name)
+    all_backbone_names = {name for name, _ in backbone.named_parameters()}
+
+    assert trainable_names, "Expected some backbone parameters to be trainable in top1_unfrozen mode."
+    assert trainable_names != all_backbone_names, (
+        "Expected only part of the backbone to be trainable in top1_unfrozen mode."
+    )
+    assert trainable_names == expected_trainable_names, (
+        "Expected only the final encoder block to be trainable within the backbone."
+    )
+    return {
+        "final_block_path": f"model.backbone.{final_block_name}",
+        "trainable_parameter_names": sorted(trainable_names),
+    }
+
+
 def load_baseline_checkpoint(
     checkpoint_path: Path,
     device: str,
