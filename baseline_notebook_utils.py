@@ -399,6 +399,7 @@ def compute_integrated_gradients(
     device: str,
     steps: int = IG_STEPS,
     normalize: bool = False,
+    internal_batch_size: int | None = 1,
 ) -> np.ndarray:
     from captum.attr import IntegratedGradients
 
@@ -415,6 +416,7 @@ def compute_integrated_gradients(
         inputs=input_embeds,
         baselines=baseline,
         n_steps=steps,
+        internal_batch_size=internal_batch_size,
     )
     importance = attributions.abs().sum(dim=-1).squeeze(0).detach().cpu().numpy()
     valid_length = int(attention_mask.sum().item())
