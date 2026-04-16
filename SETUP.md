@@ -75,4 +75,5 @@ make setup
 - `uv.lock` is the reproducibility artifact and should be committed.
 - `ipykernel` is included so notebooks and scripts share the same environment.
 - `captum` remains pinned because the probing workflow depends on integrated gradients.
+- The local `uv` environment stays on NumPy 1.26 because `captum==0.8.0` still constrains NumPy to `<2`. The Colab notebooks handle their own runtime compatibility separately.
 - The notebook code prefers an existing local Hugging Face cache for `facebook/esm2_t6_8M_UR50D` when present, but still falls back to the remote model ID for first-time downloads on machines with network access.
