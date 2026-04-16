@@ -64,6 +64,8 @@ class MTLOutputPaths:
     combined_auroc_density_png: Path
     combined_auprc_density_png: Path
     baseline_summary_csv: Path
+    mtl_family_label: str = "MTL (05)"
+    baseline_family_label: str = "Baseline (04)"
 
 
 @dataclass(frozen=True)
@@ -1128,7 +1130,7 @@ def run_probe_suite(
         probe_rows.append(
             {
                 **base,
-                "model_family": "MTL (05)",
+                "model_family": output_paths.mtl_family_label,
                 "method": "residue_head",
                 **compute_probe_metrics(epitope_labels, residue_scores),
             }
@@ -1138,7 +1140,7 @@ def run_probe_suite(
         probe_rows.append(
             {
                 **base,
-                "model_family": "MTL (05)",
+                "model_family": output_paths.mtl_family_label,
                 "method": "attention_weights",
                 **compute_probe_metrics(epitope_labels, attention_scores),
             }
@@ -1150,7 +1152,7 @@ def run_probe_suite(
         baseline_probe_rows.append(
             {
                 **base,
-                "model_family": "Baseline (04)",
+                "model_family": output_paths.baseline_family_label,
                 "method": "attention_weights",
                 **compute_probe_metrics(epitope_labels, baseline_attention_scores),
             }
@@ -1168,7 +1170,7 @@ def run_probe_suite(
         probe_rows.append(
             {
                 **base,
-                "model_family": "MTL (05)",
+                "model_family": output_paths.mtl_family_label,
                 "method": "integrated_gradients",
                 **compute_probe_metrics(epitope_labels, ig_scores),
             }
@@ -1186,7 +1188,7 @@ def run_probe_suite(
         baseline_probe_rows.append(
             {
                 **base,
-                "model_family": "Baseline (04)",
+                "model_family": output_paths.baseline_family_label,
                 "method": "integrated_gradients",
                 **compute_probe_metrics(epitope_labels, baseline_ig_scores),
             }
@@ -1197,9 +1199,21 @@ def run_probe_suite(
             for _ in range(n_random_draws)
         ]
         random_summary = mean_metric_dicts(random_metrics)
-        probe_rows.append({**base, "model_family": "MTL (05)", "method": "random_mean", **random_summary})
+        probe_rows.append(
+            {
+                **base,
+                "model_family": output_paths.mtl_family_label,
+                "method": "random_mean",
+                **random_summary,
+            }
+        )
         baseline_probe_rows.append(
-            {**base, "model_family": "Baseline (04)", "method": "random_mean", **random_summary}
+            {
+                **base,
+                "model_family": output_paths.baseline_family_label,
+                "method": "random_mean",
+                **random_summary,
+            }
         )
 
         del (
@@ -1320,9 +1334,48 @@ METHOD_XLABELS = {
     "random_mean": "Random\nMean",
     "residue_head": "Residue\nHead (MTL)",
 }
-FAMILY_ORDER = ["Baseline (04)", "MTL (05)"]
-FAMILY_LINESTYLE = {"Baseline (04)": "--", "MTL (05)": "-"}
-FAMILY_MARKER = {"Baseline (04)": "o", "MTL (05)": "^"}
+DEFAULT_FAMILY_ORDER = ["Baseline (04)", "MTL (05)", "MTL (05 frozen)", "MTL (06 top1_unfrozen)"]
+DEFAULT_FAMILY_LINESTYLE = {
+    "Baseline (04)": "--",
+    "MTL (05)": "-",
+    "MTL (05 frozen)": "-",
+    "MTL (06 top1_unfrozen)": "-.",
+}
+DEFAULT_FAMILY_MARKER = {
+    "Baseline (04)": "o",
+    "MTL (05)": "^",
+    "MTL (05 frozen)": "^",
+    "MTL (06 top1_unfrozen)": "s",
+}
+
+
+def get_family_order(combined_probe_df: pd.DataFrame) -> list[str]:
+    families = list(pd.unique(combined_probe_df["model_family"]))
+    ordered = [family for family in DEFAULT_FAMILY_ORDER if family in families]
+    remaining = sorted(family for family in families if family not in ordered)
+    return ordered + remaining
+
+
+def get_family_styles(
+    family_order: list[str],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    fallback_linestyles: list[Any] = ["-", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 2))]
+    fallback_markers = ["D", "P", "X", "v", ">"]
+    family_linestyle = {}
+    family_marker = {}
+    fallback_idx = 0
+    for family in family_order:
+        if family in DEFAULT_FAMILY_LINESTYLE:
+            family_linestyle[family] = DEFAULT_FAMILY_LINESTYLE[family]
+        else:
+            family_linestyle[family] = fallback_linestyles[fallback_idx % len(fallback_linestyles)]
+        if family in DEFAULT_FAMILY_MARKER:
+            family_marker[family] = DEFAULT_FAMILY_MARKER[family]
+        else:
+            family_marker[family] = fallback_markers[fallback_idx % len(fallback_markers)]
+        if family not in DEFAULT_FAMILY_LINESTYLE or family not in DEFAULT_FAMILY_MARKER:
+            fallback_idx += 1
+    return family_linestyle, family_marker
 
 
 def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
@@ -1331,6 +1384,8 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
 
     violin_order = ["attention_weights", "integrated_gradients", "random_mean", "residue_head"]
     violin_df = combined_probe_df[combined_probe_df["method"].isin(violin_order)].copy()
+    family_order = get_family_order(violin_df)
+    family_linestyle, _ = get_family_styles(family_order)
     metrics_config = [
         ("auroc", "AUROC"),
         ("auprc", "AUPRC"),
@@ -1348,7 +1403,7 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
             y=col,
             hue="model_family",
             order=violin_order,
-            hue_order=FAMILY_ORDER,
+            hue_order=family_order,
             inner=None,
             cut=0,
             dodge=True,
@@ -1360,7 +1415,7 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
             y=col,
             hue="model_family",
             order=violin_order,
-            hue_order=FAMILY_ORDER,
+            hue_order=family_order,
             dodge=True,
             alpha=0.35,
             size=3.5,
@@ -1368,7 +1423,7 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
             ax=ax,
         )
 
-        for family in FAMILY_ORDER:
+        for family in family_order:
             family_random = plot_data[
                 (plot_data["method"] == "random_mean") & (plot_data["model_family"] == family)
             ][col]
@@ -1376,7 +1431,7 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
                 ax.axhline(
                     float(family_random.mean()),
                     color="gray",
-                    linestyle=FAMILY_LINESTYLE[family],
+                    linestyle=family_linestyle[family],
                     linewidth=1.2,
                     alpha=0.9,
                 )
@@ -1395,7 +1450,7 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
         else:
             ax.legend().remove()
 
-    plt.suptitle("Residue Attribution Faithfulness vs. IEDB Epitopes: Baseline vs MTL", fontsize=13, y=1.02)
+    plt.suptitle("Residue Attribution Faithfulness vs. IEDB Epitopes", fontsize=13, y=1.02)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.show()
@@ -1409,6 +1464,8 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
 
     scatter_methods = ["attention_weights", "integrated_gradients", "random_mean", "residue_head"]
     scatter_df = combined_probe_df[combined_probe_df["method"].isin(scatter_methods)].copy()
+    family_order = get_family_order(scatter_df)
+    family_linestyle, family_marker = get_family_styles(family_order)
 
     for metric_col, metric_label, out_path in [
         ("auroc", "AUROC", auroc_out_path),
@@ -1417,7 +1474,7 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
         fig, ax = plt.subplots(figsize=(9, 6))
 
         for method in scatter_methods:
-            for family in FAMILY_ORDER:
+            for family in family_order:
                 mdf = scatter_df[
                     (scatter_df["method"] == method) & (scatter_df["model_family"] == family)
                 ].dropna(subset=[metric_col, "epitope_density"])
@@ -1431,7 +1488,7 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
                     color=color,
                     alpha=0.38,
                     s=30,
-                    marker=FAMILY_MARKER[family],
+                    marker=family_marker[family],
                     label=f"{METHOD_XLABELS[method].replace(chr(10), ' ')} - {family}",
                 )
                 if len(mdf) >= 5:
@@ -1446,7 +1503,7 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
                         smoothed[:, 1],
                         color=color,
                         linewidth=2.0,
-                        linestyle=FAMILY_LINESTYLE[family],
+                        linestyle=family_linestyle[family],
                     )
 
         ax.set_xlabel("Epitope Density (fraction of residues)", fontsize=12)
@@ -1463,12 +1520,12 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
                 [0],
                 color="dimgray",
                 linewidth=2.0,
-                linestyle=FAMILY_LINESTYLE[family],
-                marker=FAMILY_MARKER[family],
+                linestyle=family_linestyle[family],
+                marker=family_marker[family],
                 markersize=6,
-                label=f"{family} ({'dashed' if FAMILY_LINESTYLE[family] == '--' else 'solid'})",
+                label=family,
             )
-            for family in FAMILY_ORDER
+            for family in family_order
         ]
 
         method_legend = ax.legend(
