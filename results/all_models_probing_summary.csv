@@ -1,0 +1,12 @@
+model_family,method,auroc_mean,auroc_sd,auprc_mean,auprc_sd,precision_at_k_mean,precision_at_k_sd,n_proteins
+Baseline (04),attention_weights,0.4114,0.1256,0.317,0.2395,0.2846,0.2663,69
+Baseline (04),integrated_gradients,0.4404,0.1476,0.3376,0.2436,0.3187,0.2719,69
+Baseline (04),random_mean,0.4991,0.0063,0.3597,0.2477,0.3436,0.2512,69
+MTL (05 frozen),attention_weights,0.4127,0.1213,0.3178,0.24,0.2916,0.2657,69
+MTL (05 frozen),integrated_gradients,0.4363,0.1612,0.3348,0.2423,0.3104,0.2786,69
+MTL (05 frozen),random_mean,0.4991,0.0063,0.3597,0.2477,0.3436,0.2512,69
+MTL (05 frozen),residue_head,0.6324,0.173,0.4515,0.2865,0.4193,0.2887,69
+MTL (06 top1_unfrozen),attention_weights,0.4282,0.1201,0.3253,0.2441,0.3049,0.2686,69
+MTL (06 top1_unfrozen),integrated_gradients,0.4294,0.1741,0.3358,0.2435,0.3108,0.2834,69
+MTL (06 top1_unfrozen),random_mean,0.4991,0.0063,0.3597,0.2477,0.3436,0.2512,69
+MTL (06 top1_unfrozen),residue_head,0.6474,0.1758,0.4639,0.2877,0.4339,0.2846,69

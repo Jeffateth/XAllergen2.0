@@ -39,6 +39,7 @@ from baseline_notebook_utils import (
     load_mtl_checkpoint,
     mean_metric_dicts,
     parse_epitope_label,
+    tokenize_sequence,
 )
 
 
@@ -1378,6 +1379,32 @@ def get_family_styles(
     return family_linestyle, family_marker
 
 
+def describe_linestyle(linestyle: Any) -> str:
+    if linestyle == "--":
+        return "dashed"
+    if linestyle == "-.":
+        return "dash-dot"
+    if linestyle == ":":
+        return "dotted"
+    if linestyle == "-":
+        return "solid"
+    return "custom dash"
+
+
+def describe_marker(marker: str) -> str:
+    marker_names = {
+        "o": "circle",
+        "^": "triangle",
+        "s": "square",
+        "D": "diamond",
+        "P": "plus",
+        "X": "x",
+        "v": "down-triangle",
+        ">": "right-triangle",
+    }
+    return marker_names.get(marker, marker)
+
+
 def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -1519,11 +1546,15 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
                 [0],
                 [0],
                 color="dimgray",
-                linewidth=2.0,
+                linewidth=2.6,
                 linestyle=family_linestyle[family],
                 marker=family_marker[family],
-                markersize=6,
-                label=family,
+                markersize=7,
+                label=(
+                    f"{family}: "
+                    f"{describe_linestyle(family_linestyle[family])} + "
+                    f"{describe_marker(family_marker[family])}"
+                ),
             )
             for family in family_order
         ]
@@ -1539,7 +1570,7 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
         ax.add_artist(method_legend)
         ax.legend(
             handles=family_handles,
-            title="Model / Style",
+            title="Model / Style\n(line + marker)",
             fontsize=8,
             title_fontsize=9,
             loc="upper left",
