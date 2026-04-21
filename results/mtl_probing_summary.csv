@@ -1,5 +1,5 @@
 method,auroc_mean,auroc_sd,auprc_mean,auprc_sd,precision_at_k_mean,precision_at_k_sd,n_proteins
-residue_head,0.6324,0.173,0.4515,0.2865,0.4193,0.2887,69
-attention_weights,0.4127,0.1213,0.3178,0.24,0.2916,0.2657,69
-integrated_gradients,0.4363,0.1612,0.3348,0.2423,0.3104,0.2786,69
-random_mean,0.4991,0.0063,0.3597,0.2477,0.3436,0.2512,69
+residue_head,0.6495,0.1627,0.3735,0.2575,0.3378,0.2573,58
+attention_weights,0.4478,0.1117,0.2462,0.1987,0.2126,0.2128,58
+integrated_gradients,0.4434,0.1628,0.2583,0.21,0.2218,0.2254,58
+random_mean,0.4997,0.0049,0.2692,0.1982,0.2512,0.1998,58

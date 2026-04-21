@@ -1071,42 +1071,9 @@ def run_probe_suite(
     baseline_ig_model = baseline_model
     baseline_ig_model.eval()
 
-    completed_accessions: set[str] = set()
-    if resume:
-        if output_paths.probe_rows_path.exists():
-            existing_probe_df = pd.read_csv(output_paths.probe_rows_path)
-            probe_rows = existing_probe_df.to_dict("records")
-            completed_accessions.update(
-                accession
-                for accession, method_count in existing_probe_df.groupby("accession")["method"].nunique().items()
-                if method_count >= len(expected_mtl_methods)
-            )
-            print(
-                f"Loaded {len(existing_probe_df)} existing MTL probe rows from "
-                f"{output_paths.probe_rows_path}"
-            )
-        if output_paths.baseline_probe_rows_path.exists():
-            existing_baseline_probe_df = pd.read_csv(output_paths.baseline_probe_rows_path)
-            baseline_probe_rows = existing_baseline_probe_df.to_dict("records")
-            completed_accessions &= {
-                accession
-                for accession, method_count in existing_baseline_probe_df.groupby("accession")["method"].nunique().items()
-                if method_count >= len(expected_baseline_methods)
-            } if completed_accessions else {
-                accession
-                for accession, method_count in existing_baseline_probe_df.groupby("accession")["method"].nunique().items()
-                if method_count >= len(expected_baseline_methods)
-            }
-            print(
-                f"Loaded {len(existing_baseline_probe_df)} existing baseline probe rows from "
-                f"{output_paths.baseline_probe_rows_path}"
-            )
-
     print(f"Integrated Gradients device: {ig_probe_device}")
     print(f"IG_STEPS: {ig_steps}")
     print(f"IG internal_batch_size: {ig_internal_batch_size}")
-    if completed_accessions:
-        print(f"Resuming probe run: skipping {len(completed_accessions)} completed accessions")
 
     gc.collect()
     if torch.cuda.is_available():
@@ -1115,8 +1082,6 @@ def run_probe_suite(
     processed_since_save = 0
     for _, row in tqdm(epitope_probe_df.iterrows(), total=len(epitope_probe_df), desc="Probing splitB"):
         accession = str(row["accession"])
-        if accession in completed_accessions:
-            continue
 
         sequence = row["sequence"]
         epitope_labels = row["epitope_label"]

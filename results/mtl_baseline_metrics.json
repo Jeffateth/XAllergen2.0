@@ -17,73 +17,73 @@
     "lambda_epi": 0.5,
     "use_protein_pos_weight": false,
     "protein_pos_weight": null,
-    "residue_pos_weight": 2.9089303016662598,
+    "residue_pos_weight": 3.9145848751068115,
     "residue_pos_weight_formula": "total_non_epitope_residues / total_epitope_residues",
-    "total_epitope_residues_train": 24344.0,
-    "total_non_epitope_residues_train": 70815.0,
-    "best_epoch": 7,
+    "total_epitope_residues_train": 18053.0,
+    "total_non_epitope_residues_train": 70670.0,
+    "best_epoch": 6,
     "early_stopped": false
   },
   "validation_losses": {
-    "total_loss": 0.6371181607246399,
-    "cls_loss": 0.1661833425362905,
-    "epi_loss": 0.9234459437845794,
-    "weighted_cls": 0.1661833425362905,
-    "weighted_epi": 0.4617229718922897
+    "total_loss": 0.7645418047904968,
+    "cls_loss": 0.2501436285674572,
+    "epi_loss": 1.072782397830941,
+    "weighted_cls": 0.2501436285674572,
+    "weighted_epi": 0.5363911989154705
   },
   "validation_classification_metrics": {
     "threshold": 0.5,
-    "accuracy": 0.9583333333333334,
-    "auroc": 0.9837837837837838,
-    "auprc": 0.9851530754114507,
-    "f1": 0.958904109589041,
-    "precision": 0.9722222222222222,
-    "recall": 0.9459459459459459,
-    "specificity": 0.9714285714285714,
-    "mcc": 0.9170205237216018,
+    "accuracy": 0.921875,
+    "auroc": 0.9657869012707723,
+    "auprc": 0.9711984481070501,
+    "f1": 0.9230769230769231,
+    "precision": 0.9375,
+    "recall": 0.9090909090909091,
+    "specificity": 0.9354838709677419,
+    "mcc": 0.8441622892989752,
     "confusion_matrix": {
-      "tn": 34,
-      "fp": 1,
-      "fn": 2,
-      "tp": 35
+      "tn": 29,
+      "fp": 2,
+      "fn": 3,
+      "tp": 30
     }
   },
   "validation_residue_metrics": {
-    "n_valid_residues": 10301,
-    "n_positive_residues": 2145,
-    "auroc": 0.6690886398218423,
-    "auprc": 0.32407358522957774,
-    "precision_at_k": 0.35477855801582336
+    "n_valid_residues": 9673,
+    "n_positive_residues": 1825,
+    "auroc": 0.5961569826707441,
+    "auprc": 0.25197476002789,
+    "precision_at_k": 0.28219178318977356
   },
   "test_metrics": {
     "threshold": 0.5,
-    "accuracy": 0.832258064516129,
-    "auroc": 0.9106841927873274,
-    "auprc": 0.8836543104293286,
-    "f1": 0.8115942028985508,
-    "precision": 0.8115942028985508,
-    "recall": 0.8115942028985508,
-    "specificity": 0.8488372093023255,
-    "mcc": 0.6604314122008763,
+    "accuracy": 0.8208955223880597,
+    "auroc": 0.933529945553539,
+    "auprc": 0.9214718836830152,
+    "f1": 0.8095238095238095,
+    "precision": 0.75,
+    "recall": 0.8793103448275862,
+    "specificity": 0.7763157894736842,
+    "mcc": 0.6497564894426124,
     "confusion_matrix": {
-      "tn": 73,
-      "fp": 13,
-      "fn": 13,
-      "tp": 56
+      "tn": 59,
+      "fp": 17,
+      "fn": 7,
+      "tp": 51
     },
-    "test_total_loss": 0.9763051526887077,
-    "test_cls_loss": 0.38828518429110126,
-    "test_epi_loss": 0.9900758252523901,
-    "test_weighted_cls": 0.38828518429110126,
-    "test_weighted_epi": 0.49503791262619506,
-    "best_epoch": 7,
-    "n_test_sequences": 155
+    "test_total_loss": 0.885727991660436,
+    "test_cls_loss": 0.35549322348922047,
+    "test_epi_loss": 1.0675672754665682,
+    "test_weighted_cls": 0.35549322348922047,
+    "test_weighted_epi": 0.5337836377332841,
+    "best_epoch": 6,
+    "n_test_sequences": 134
   },
   "test_residue_metrics": {
-    "n_valid_residues": 17892,
-    "n_positive_residues": 5106,
-    "auroc": 0.6885888551110023,
-    "auprc": 0.4317658338694237,
-    "precision_at_k": 0.4586760699748993
+    "n_valid_residues": 15389,
+    "n_positive_residues": 3241,
+    "auroc": 0.6596116527244922,
+    "auprc": 0.3010710613852987,
+    "precision_at_k": 0.31379204988479614
   }
 }
