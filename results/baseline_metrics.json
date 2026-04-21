@@ -10,27 +10,29 @@
     "early_stopping_patience": 5,
     "optimizer": "AdamW",
     "lr": 0.001,
-    "weight_decay": 0.0001
+    "weight_decay": 0.0001,
+    "protein_pos_weight": 1.0387755632400513,
+    "protein_pos_weight_formula": "n_neg / n_pos in train split after 90/10 stratified split"
   },
-  "validation_loss": 0.25062609319299245,
+  "validation_loss": 0.19266067927689862,
   "test_metrics": {
     "threshold": 0.5,
-    "accuracy": 0.9113372093023255,
-    "auroc": 0.9672521464305028,
-    "auprc": 0.9682752214296395,
-    "f1": 0.9108187134502924,
-    "precision": 0.9161764705882353,
-    "recall": 0.9055232558139535,
-    "specificity": 0.9171511627906976,
-    "mcc": 0.8227300404172704,
+    "accuracy": 0.9193899782135077,
+    "auroc": 0.969138382303276,
+    "auprc": 0.9716853817909046,
+    "f1": 0.9172259507829977,
+    "precision": 0.9192825112107623,
+    "recall": 0.9151785714285714,
+    "specificity": 0.9234042553191489,
+    "mcc": 0.8386784262418746,
     "confusion_matrix": {
-      "tn": 631,
-      "fp": 57,
-      "fn": 65,
-      "tp": 623
+      "tn": 651,
+      "fp": 54,
+      "fn": 57,
+      "tp": 615
     },
-    "test_loss": 0.23252507357663194,
-    "best_epoch": 11,
-    "n_test_sequences": 1376
+    "test_loss": 0.2438393087168924,
+    "best_epoch": 21,
+    "n_test_sequences": 1377
   }
 }
