@@ -38,6 +38,7 @@ from baseline_notebook_utils import (
     load_baseline_checkpoint,
     load_mtl_checkpoint,
     mean_metric_dicts,
+    normalize_scores,
     parse_epitope_label,
     tokenize_sequence,
 )
@@ -1036,6 +1037,49 @@ def compute_probe_metrics(labels: np.ndarray, scores: np.ndarray) -> dict[str, f
     }
 
 
+def compute_occlusion_scores_mtl(
+    model,
+    tokenizer,
+    sequence: str,
+    device: str,
+) -> np.ndarray:
+    """
+    Single-residue occlusion for MTL models.
+    Replaces residue i with mask token, records delta_p on the
+    classification head output only (not the epitope head).
+    Returns float32 array of shape (L,).
+    """
+    assert tokenizer.mask_token is not None, (
+        "Tokenizer has no mask token. Rebuild with add_special_tokens=True."
+    )
+
+    model.eval()
+
+    def _forward(seq: str) -> float:
+        enc = tokenizer(
+            seq,
+            add_special_tokens=False,
+            padding=False,
+            truncation=False,
+            return_tensors="pt",
+        )
+        enc = {key: value.to(device) for key, value in enc.items()}
+        with torch.no_grad():
+            outputs = model(enc["input_ids"], enc["attention_mask"])
+        return float(torch.sigmoid(outputs["logits"]).item())
+
+    p_base = _forward(sequence)
+    residues = list(sequence)
+    delta_p = np.zeros(len(residues), dtype=np.float32)
+
+    for idx in range(len(residues)):
+        masked = residues.copy()
+        masked[idx] = tokenizer.mask_token
+        delta_p[idx] = p_base - _forward("".join(masked))
+
+    return delta_p
+
+
 def run_probe_suite(
     model,
     tokenizer,
@@ -1054,7 +1098,13 @@ def run_probe_suite(
 ) -> dict[str, pd.DataFrame]:
     ig_probe_device = device
     rng = np.random.default_rng(RANDOM_STATE)
-    expected_mtl_methods = {"residue_head", "attention_weights", "integrated_gradients", "random_mean"}
+    expected_mtl_methods = {
+        "residue_head",
+        "attention_weights",
+        "integrated_gradients",
+        "occlusion",
+        "random_mean",
+    }
     expected_baseline_methods = {"attention_weights", "integrated_gradients", "random_mean"}
     probe_rows = []
     baseline_probe_rows = []
@@ -1142,6 +1192,18 @@ def run_probe_suite(
             }
         )
 
+        occlusion_scores = normalize_scores(
+            compute_occlusion_scores_mtl(ig_model, tokenizer, sequence, ig_probe_device)
+        )
+        probe_rows.append(
+            {
+                **base,
+                "model_family": output_paths.mtl_family_label,
+                "method": "occlusion",
+                **compute_probe_metrics(epitope_labels, occlusion_scores),
+            }
+        )
+
         baseline_ig_scores = compute_integrated_gradients(
             baseline_ig_model,
             tokenizer,
@@ -1187,6 +1249,7 @@ def run_probe_suite(
             attention_scores,
             baseline_attention_scores,
             ig_scores,
+            occlusion_scores,
             baseline_ig_scores,
             random_metrics,
             random_summary,
@@ -1230,19 +1293,50 @@ def run_probe_suite(
     }
 
 
+def bootstrap_mean_ci(
+    values: pd.Series | np.ndarray | list[float],
+    n_bootstrap: int = 2000,
+    ci: float = 95.0,
+    random_state: int = RANDOM_STATE,
+) -> tuple[float, float, float]:
+    clean = pd.Series(values, dtype=float).dropna().to_numpy()
+    if clean.size == 0:
+        return math.nan, math.nan, math.nan
+
+    mean_value = float(clean.mean())
+    if clean.size == 1:
+        return mean_value, mean_value, mean_value
+
+    rng = np.random.default_rng(random_state)
+    bootstrap_means = np.empty(n_bootstrap, dtype=np.float64)
+    for idx in range(n_bootstrap):
+        sample = rng.choice(clean, size=clean.size, replace=True)
+        bootstrap_means[idx] = sample.mean()
+
+    alpha = (100.0 - ci) / 2.0
+    ci_low, ci_high = np.percentile(bootstrap_means, [alpha, 100.0 - alpha])
+    return mean_value, float(ci_low), float(ci_high)
+
+
 def summarize_probe_methods(frame: pd.DataFrame, methods: list[str]) -> pd.DataFrame:
     summary_rows = []
     for method in methods:
         method_df = frame[frame["method"] == method]
+        auroc_mean, auroc_ci_low, auroc_ci_high = bootstrap_mean_ci(method_df["auroc"])
+        auprc_mean, auprc_ci_low, auprc_ci_high = bootstrap_mean_ci(method_df["auprc"])
+        precision_mean, precision_ci_low, precision_ci_high = bootstrap_mean_ci(method_df["precision_at_k"])
         summary_rows.append(
             {
                 "method": method,
-                "auroc_mean": round(float(method_df["auroc"].dropna().mean()), 4),
-                "auroc_sd": round(float(method_df["auroc"].dropna().std()), 4),
-                "auprc_mean": round(float(method_df["auprc"].dropna().mean()), 4),
-                "auprc_sd": round(float(method_df["auprc"].dropna().std()), 4),
-                "precision_at_k_mean": round(float(method_df["precision_at_k"].dropna().mean()), 4),
-                "precision_at_k_sd": round(float(method_df["precision_at_k"].dropna().std()), 4),
+                "auroc_mean": round(auroc_mean, 4),
+                "auroc_ci_low": round(auroc_ci_low, 4),
+                "auroc_ci_high": round(auroc_ci_high, 4),
+                "auprc_mean": round(auprc_mean, 4),
+                "auprc_ci_low": round(auprc_ci_low, 4),
+                "auprc_ci_high": round(auprc_ci_high, 4),
+                "precision_at_k_mean": round(precision_mean, 4),
+                "precision_at_k_ci_low": round(precision_ci_low, 4),
+                "precision_at_k_ci_high": round(precision_ci_high, 4),
                 "n_proteins": int(len(method_df)),
             }
         )
@@ -1256,7 +1350,7 @@ def summarize_probe_outputs(
 ) -> dict[str, pd.DataFrame]:
     summary_df = summarize_probe_methods(
         probe_df,
-        ["residue_head", "attention_weights", "integrated_gradients", "random_mean"],
+        ["residue_head", "attention_weights", "integrated_gradients", "occlusion", "random_mean"],
     )
     baseline_summary_df = summarize_probe_methods(
         baseline_probe_df,
@@ -1291,12 +1385,14 @@ def summarize_probe_outputs(
 PALETTE = {
     "attention_weights": "#4C72B0",
     "integrated_gradients": "#DD8452",
+    "occlusion": "#8172B3",
     "random_mean": "#55A868",
     "residue_head": "#C44E52",
 }
 METHOD_XLABELS = {
     "attention_weights": "Attention\nWeights",
     "integrated_gradients": "Integrated\nGradients",
+    "occlusion": "Occlusion",
     "random_mean": "Random\nMean",
     "residue_head": "Residue\nHead (MTL)",
 }
@@ -1374,7 +1470,7 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
     import matplotlib.pyplot as plt
     import seaborn as sns
 
-    violin_order = ["attention_weights", "integrated_gradients", "random_mean", "residue_head"]
+    violin_order = ["attention_weights", "integrated_gradients", "occlusion", "random_mean", "residue_head"]
     violin_df = combined_probe_df[combined_probe_df["method"].isin(violin_order)].copy()
     family_order = get_family_order(violin_df)
     family_linestyle, _ = get_family_styles(family_order)
@@ -1428,9 +1524,11 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
                     alpha=0.9,
                 )
 
-        overall_mean = plot_data[col].mean()
-        overall_sd = plot_data[col].std()
-        ax.set_title(f"{label}\nmean±SD: {overall_mean:.3f} ± {overall_sd:.3f}", fontsize=11)
+        overall_mean, overall_ci_low, overall_ci_high = bootstrap_mean_ci(plot_data[col])
+        ax.set_title(
+            f"{label}\nmean [95% bootstrap CI]: {overall_mean:.3f} [{overall_ci_low:.3f}, {overall_ci_high:.3f}]",
+            fontsize=11,
+        )
         ax.set_xlabel("Method")
         ax.set_ylabel(label)
         ax.set_xticklabels([METHOD_XLABELS[m] for m in violin_order], fontsize=9)
@@ -1449,12 +1547,282 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
     print(f"Saved plot to: {out_path}")
 
 
+def plot_probe_paired_deltas(
+    combined_probe_df: pd.DataFrame,
+    out_path: Path,
+    metric: str = "auprc",
+    baseline_family: str = "Baseline (04)",
+    compare_family: str | None = None,
+) -> None:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    metric_labels = {
+        "auroc": "AUROC",
+        "auprc": "AUPRC",
+        "precision_at_k": "Precision@k",
+    }
+    if metric not in metric_labels:
+        raise ValueError(f"Unsupported metric for paired delta plot: {metric}")
+
+    if compare_family is None:
+        family_order = get_family_order(combined_probe_df)
+        compare_family = next((family for family in family_order if family != baseline_family), None)
+        if compare_family is None:
+            raise ValueError("No non-baseline model_family available for paired delta plotting.")
+
+    plot_df = combined_probe_df[
+        combined_probe_df["model_family"].isin([baseline_family, compare_family])
+    ].copy()
+    plot_df = plot_df.loc[plot_df["method"] != "random_mean"].copy()
+    plot_df = plot_df.dropna(subset=[metric]).copy()
+
+    methods_in_both = []
+    preferred_order = ["attention_weights", "integrated_gradients", "occlusion", "residue_head"]
+    baseline_methods = set(plot_df.loc[plot_df["model_family"] == baseline_family, "method"])
+    compare_methods = set(plot_df.loc[plot_df["model_family"] == compare_family, "method"])
+    for method in preferred_order:
+        if method in baseline_methods and method in compare_methods:
+            methods_in_both.append(method)
+
+    delta_frames = []
+    for method in methods_in_both:
+        baseline_method_df = plot_df.loc[
+            (plot_df["model_family"] == baseline_family) & (plot_df["method"] == method),
+            ["accession", metric],
+        ].rename(columns={metric: "baseline_value"})
+        compare_method_df = plot_df.loc[
+            (plot_df["model_family"] == compare_family) & (plot_df["method"] == method),
+            ["accession", metric],
+        ].rename(columns={metric: "compare_value"})
+        merged = baseline_method_df.merge(compare_method_df, on="accession", how="inner")
+        if merged.empty:
+            continue
+        merged["method"] = method
+        merged["delta"] = merged["compare_value"] - merged["baseline_value"]
+        merged["baseline_family"] = baseline_family
+        merged["compare_family"] = compare_family
+        delta_frames.append(
+            merged[
+                [
+                    "accession",
+                    "method",
+                    "delta",
+                    "baseline_value",
+                    "compare_value",
+                    "baseline_family",
+                    "compare_family",
+                ]
+            ]
+        )
+
+    if not delta_frames:
+        raise ValueError("No paired accession-level comparisons available for paired delta plotting.")
+
+    delta_df = pd.concat(delta_frames, ignore_index=True)
+    if delta_df.empty:
+        raise ValueError("No paired accession-level comparisons available for paired delta plotting.")
+
+    method_order = [method for method in preferred_order if method in set(delta_df["method"])]
+    palette = {method: PALETTE[method] for method in method_order}
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.violinplot(
+        data=delta_df,
+        x="method",
+        y="delta",
+        order=method_order,
+        palette=palette,
+        inner=None,
+        cut=0,
+        linewidth=1.0,
+        ax=ax,
+    )
+    sns.boxplot(
+        data=delta_df,
+        x="method",
+        y="delta",
+        order=method_order,
+        width=0.18,
+        showcaps=True,
+        boxprops={"facecolor": "white", "alpha": 0.9, "zorder": 3},
+        whiskerprops={"linewidth": 1.1},
+        medianprops={"color": "black", "linewidth": 1.4},
+        showfliers=False,
+        ax=ax,
+    )
+    sns.stripplot(
+        data=delta_df,
+        x="method",
+        y="delta",
+        order=method_order,
+        hue="method",
+        palette=palette,
+        alpha=0.4,
+        size=4,
+        jitter=0.18,
+        dodge=False,
+        ax=ax,
+    )
+    if ax.legend_ is not None:
+        ax.legend_.remove()
+
+    ax.axhline(0.0, color="gray", linestyle="--", linewidth=1.2, alpha=0.9)
+    ax.set_xlabel("Method")
+    ax.set_ylabel(f"Δ{metric_labels[metric]}")
+    ax.set_xticklabels([METHOD_XLABELS.get(method, method) for method in method_order], fontsize=9)
+    ax.set_title(
+        f"Per-protein Δ{metric_labels[metric]} vs Baseline\n{compare_family} - {baseline_family}",
+        fontsize=13,
+    )
+
+    y_min, y_max = ax.get_ylim()
+    y_span = y_max - y_min if y_max > y_min else 1.0
+    for idx, method in enumerate(method_order):
+        method_df = delta_df.loc[delta_df["method"] == method]
+        if method_df.empty:
+            continue
+        ax.text(
+            idx,
+            method_df["delta"].max() + 0.04 * y_span,
+            f"median={method_df['delta'].median():.3f}\nn={len(method_df)}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.show()
+    print(f"Saved plot to: {out_path}")
+
+
+def plot_probe_binned_density_trends(
+    combined_probe_df: pd.DataFrame,
+    out_path: Path,
+    metric: str = "auprc",
+    n_bins: int = 6,
+    include_methods: list[str] | None = None,
+) -> None:
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    metric_labels = {
+        "auroc": "AUROC",
+        "auprc": "AUPRC",
+        "precision_at_k": "Precision@k",
+    }
+    if metric not in metric_labels:
+        raise ValueError(f"Unsupported metric for binned density trend plot: {metric}")
+
+    if include_methods is None:
+        include_methods = ["attention_weights", "integrated_gradients", "occlusion", "residue_head", "random_mean"]
+    include_methods = [method for method in include_methods if method in set(combined_probe_df["method"])]
+
+    plot_df = combined_probe_df.loc[combined_probe_df["method"].isin(include_methods)].copy()
+    plot_df = plot_df.dropna(subset=[metric, "epitope_density"]).copy()
+    plot_df["density_bin"] = pd.qcut(plot_df["epitope_density"], q=n_bins, duplicates="drop")
+
+    if plot_df["density_bin"].nunique() < 3:
+        raise ValueError("Fewer than 3 unique epitope-density bins remain after qcut; cannot plot binned density trends.")
+
+    plot_df["bin_midpoint"] = plot_df["density_bin"].map(lambda interval: float((interval.left + interval.right) / 2))
+    grouped = (
+        plot_df.groupby(["model_family", "method", "density_bin"], observed=True)
+        .agg(
+            mean_metric=(metric, "mean"),
+            std_metric=(metric, "std"),
+            count=(metric, "count"),
+            bin_midpoint=("bin_midpoint", "first"),
+        )
+        .reset_index()
+    )
+    grouped["sem_metric"] = np.where(
+        grouped["count"] > 1,
+        grouped["std_metric"] / np.sqrt(grouped["count"]),
+        np.nan,
+    )
+
+    family_order = get_family_order(grouped)
+    family_linestyle, family_marker = get_family_styles(family_order)
+    method_order = [method for method in include_methods if method in set(grouped["method"])]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for family in family_order:
+        for method in method_order:
+            subset = grouped.loc[
+                (grouped["model_family"] == family) & (grouped["method"] == method)
+            ].sort_values("bin_midpoint")
+            if subset.empty:
+                continue
+            ax.errorbar(
+                subset["bin_midpoint"],
+                subset["mean_metric"],
+                yerr=subset["sem_metric"],
+                color=PALETTE[method],
+                linestyle=family_linestyle[family],
+                marker=family_marker[family],
+                linewidth=2.0,
+                markersize=6,
+                capsize=3,
+                alpha=0.9,
+            )
+
+    ax.set_title(f"Binned {metric_labels[metric]} vs. Epitope Density", fontsize=13)
+    ax.set_xlabel("Epitope Density (quantile-bin midpoint)", fontsize=12)
+    ax.set_ylabel(metric_labels[metric], fontsize=12)
+
+    method_handles = [
+        Line2D([0], [0], color=PALETTE[method], linewidth=2.5, label=METHOD_XLABELS.get(method, method).replace("\n", " "))
+        for method in method_order
+    ]
+    family_handles = [
+        Line2D(
+            [0],
+            [0],
+            color="dimgray",
+            linewidth=2.6,
+            linestyle=family_linestyle[family],
+            marker=family_marker[family],
+            markersize=7,
+            label=(
+                f"{family}: "
+                f"{describe_linestyle(family_linestyle[family])} + "
+                f"{describe_marker(family_marker[family])}"
+            ),
+        )
+        for family in family_order
+    ]
+
+    method_legend = ax.legend(
+        handles=method_handles,
+        title="Method / Color",
+        fontsize=8,
+        title_fontsize=9,
+        loc="upper left",
+        bbox_to_anchor=(0.01, 0.99),
+    )
+    ax.add_artist(method_legend)
+    ax.legend(
+        handles=family_handles,
+        title="Model family / Line + marker",
+        fontsize=8,
+        title_fontsize=9,
+        loc="upper left",
+        bbox_to_anchor=(0.40, 0.99),
+    )
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.show()
+    print(f"Saved plot to: {out_path}")
+
+
 def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: Path, auprc_out_path: Path) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from statsmodels.nonparametric.smoothers_lowess import lowess
 
-    scatter_methods = ["attention_weights", "integrated_gradients", "random_mean", "residue_head"]
+    scatter_methods = ["attention_weights", "integrated_gradients", "occlusion", "random_mean", "residue_head"]
     scatter_df = combined_probe_df[combined_probe_df["method"].isin(scatter_methods)].copy()
     family_order = get_family_order(scatter_df)
     family_linestyle, family_marker = get_family_styles(family_order)
