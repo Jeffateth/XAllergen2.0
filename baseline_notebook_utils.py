@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 import os
 import random
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
+from sklearn.metrics import average_precision_score, roc_auc_score
 from torch import nn
+from tqdm.auto import tqdm
 from transformers import AutoTokenizer, EsmModel
 
 
@@ -567,6 +571,321 @@ def compute_integrated_gradients(
     valid_length = int(attention_mask.sum().item())
     importance = importance[:valid_length]
     return normalize_scores(importance) if normalize else importance
+
+
+def serialize_score_array(scores: np.ndarray) -> str:
+    array = np.asarray(scores, dtype=np.float32)
+    return json.dumps(array.tolist(), separators=(",", ":"))
+
+
+def precision_at_k(y_true: np.ndarray, scores: np.ndarray) -> float:
+    k = int(np.asarray(y_true).sum())
+    if k == 0:
+        return float("nan")
+    top_k = np.argsort(scores)[::-1][:k]
+    return float(np.asarray(y_true)[top_k].sum() / k)
+
+
+def compute_probe_metrics(y_true: np.ndarray, scores: np.ndarray) -> dict[str, float]:
+    y_true = np.asarray(y_true)
+    scores = np.asarray(scores)
+    if len(np.unique(y_true)) < 2:
+        auroc = float("nan")
+    else:
+        auroc = float(roc_auc_score(y_true, scores))
+    return {
+        "auroc": auroc,
+        "auprc": float(average_precision_score(y_true, scores)),
+        "precision_at_k": precision_at_k(y_true, scores),
+    }
+
+
+def prepare_baseline_probe_frame(positives_csv: Path) -> pd.DataFrame:
+    raw_df = pd.read_csv(positives_csv)
+    raw_df["accession"] = raw_df["accession"].astype(str)
+    raw_df["sequence"] = raw_df["sequence"].astype(str).str.strip().str.upper()
+
+    records = []
+    for _, row in raw_df.iterrows():
+        label_vec = parse_epitope_label(row["sequence"], row["epitope_start"], row["epitope_end"])
+        n_epitope = int(label_vec.sum())
+        seq_len = len(row["sequence"])
+        if n_epitope == 0 or n_epitope == seq_len:
+            continue
+        records.append(
+            {
+                "accession": row["accession"],
+                "sequence": row["sequence"],
+                "epitope_label": label_vec,
+                "seq_len": seq_len,
+                "n_epitope_residues": n_epitope,
+                "epitope_density": n_epitope / seq_len,
+            }
+        )
+    return pd.DataFrame(records).reset_index(drop=True)
+
+
+def run_baseline_probe_suite(
+    model,
+    tokenizer,
+    eval_df: pd.DataFrame,
+    device: str,
+    ig_steps: int = IG_STEPS,
+    n_random_draws: int = 100,
+    max_seq_len: int = MAX_SEQ_LEN,
+) -> pd.DataFrame:
+    rng = np.random.default_rng(RANDOM_STATE)
+    results_rows = []
+
+    for _, row in tqdm(eval_df.iterrows(), total=len(eval_df), desc="Evaluating proteins"):
+        sequence = row["sequence"]
+        epitope_labels = row["epitope_label"]
+        accession = row["accession"]
+        seq_len = row["seq_len"]
+
+        tok_len = tokenizer(sequence, add_special_tokens=False, return_tensors="pt")["input_ids"].shape[1]
+        if tok_len > max_seq_len:
+            continue
+
+        base = {
+            "accession": accession,
+            "seq_len": seq_len,
+            "epitope_density": row["epitope_density"],
+            "n_epitope_residues": row["n_epitope_residues"],
+        }
+
+        attn_scores = None
+        try:
+            attn_scores = compute_attention_weights(model, tokenizer, sequence, device)
+            results_rows.append(
+                {**base, "method": "attention_weights", **compute_probe_metrics(epitope_labels, attn_scores)}
+            )
+        except Exception as exc:
+            print(f"[attention] {accession}: {exc}")
+
+        try:
+            ig_scores = compute_integrated_gradients(
+                model,
+                tokenizer,
+                sequence,
+                device,
+                steps=ig_steps,
+                normalize=False,
+            )
+            results_rows.append(
+                {
+                    **base,
+                    "method": "integrated_gradients",
+                    "ig_scores_json": serialize_score_array(ig_scores),
+                    **compute_probe_metrics(epitope_labels, ig_scores),
+                }
+            )
+        except Exception as exc:
+            print(f"[IG] {accession}: {exc}")
+
+        rand_metrics = [
+            compute_probe_metrics(epitope_labels, rng.uniform(0.0, 1.0, size=seq_len))
+            for _ in range(n_random_draws)
+        ]
+        results_rows.append(
+            {
+                **base,
+                "method": "random_mean",
+                **mean_metric_dicts(rand_metrics),
+            }
+        )
+
+        if attn_scores is not None:
+            try:
+                shuffled_metrics = [
+                    compute_probe_metrics(rng.permutation(epitope_labels), attn_scores)
+                    for _ in range(n_random_draws)
+                ]
+                results_rows.append(
+                    {
+                        **base,
+                        "method": "shuffled_mean",
+                        **mean_metric_dicts(shuffled_metrics),
+                    }
+                )
+            except Exception as exc:
+                print(f"[shuffled] {accession}: {exc}")
+
+    return pd.DataFrame(results_rows)
+
+
+# ── Stage 1 ────────────────────────────────────────────────────────────
+
+def get_top_k_indices(ig_scores: np.ndarray, k_pct: float) -> list[int]:
+    """
+    Return indices of top-k% residues by IG score.
+    k_pct is a fraction in (0, 1], e.g. 0.05 for top 5%.
+    k is at least 1.
+    """
+    k = max(1, int(np.ceil(len(ig_scores) * k_pct)))
+    return np.argsort(ig_scores)[::-1][:k].tolist()
+
+
+def validate_ig_residues_by_masking(
+    model,
+    tokenizer,
+    sequence: str,
+    ig_scores: np.ndarray,
+    device: str,
+    k_pct: float,
+) -> dict:
+    """
+    Mask the top-k% IG-important residues simultaneously and record
+    the drop in allergenicity probability.
+
+    Returns:
+        {
+          "k_pct": float,
+          "k_absolute": int,
+          "p_base": float,
+          "p_masked": float,
+          "delta_p": float,
+          "top_k_indices": list[int],
+          "validated": bool,         # True if delta_p > 0
+        }
+    """
+    model.eval()
+
+    assert tokenizer.mask_token is not None, (
+        "Tokenizer has no mask token. Rebuild with add_special_tokens=True."
+    )
+
+    def _forward(seq: str) -> float:
+        enc = tokenizer(
+            seq,
+            add_special_tokens=False,
+            padding=False,
+            truncation=False,
+            return_tensors="pt",
+        )
+        enc = {key: value.to(device) for key, value in enc.items()}
+        with torch.no_grad():
+            outputs = model(enc["input_ids"], enc["attention_mask"])
+        return float(torch.sigmoid(outputs["logits"]).item())
+
+    top_k_indices = get_top_k_indices(ig_scores, k_pct)
+
+    residues = list(sequence)
+    masked = residues.copy()
+    for idx in top_k_indices:
+        masked[idx] = tokenizer.mask_token
+
+    p_base = _forward(sequence)
+    p_masked = _forward("".join(masked))
+    delta_p = p_base - p_masked
+
+    return {
+        "k_pct": k_pct,
+        "k_absolute": len(top_k_indices),
+        "p_base": float(p_base),
+        "p_masked": float(p_masked),
+        "delta_p": float(delta_p),
+        "top_k_indices": top_k_indices,
+        "validated": bool(delta_p > 0),
+    }
+
+
+# ── Stage 2 ────────────────────────────────────────────────────────────
+
+AMINO_ACIDS = list("ACDEFGHIKLMNPQRSTVWY")
+
+
+def run_saturation_mutagenesis(
+    model,
+    tokenizer,
+    sequence: str,
+    target_indices: list[int],
+    device: str,
+    p_base: float | None = None,
+) -> pd.DataFrame:
+    """
+    For each residue index in target_indices, substitute all 20 amino
+    acids one at a time and record the change in allergenicity probability.
+
+    Returns a DataFrame with columns:
+        position, original_aa, mutant_aa, p_base, p_mutant, delta_p,
+        reduces_allergenicity
+    """
+    model.eval()
+
+    def _forward(seq: str) -> float:
+        enc = tokenizer(
+            seq,
+            add_special_tokens=False,
+            padding=False,
+            truncation=False,
+            return_tensors="pt",
+        )
+        enc = {key: value.to(device) for key, value in enc.items()}
+        with torch.no_grad():
+            outputs = model(enc["input_ids"], enc["attention_mask"])
+        return float(torch.sigmoid(outputs["logits"]).item())
+
+    if p_base is None:
+        p_base = _forward(sequence)
+
+    residues = list(sequence)
+    rows = []
+
+    for idx in target_indices:
+        original_aa = residues[idx]
+        for mutant_aa in AMINO_ACIDS:
+            if mutant_aa == original_aa:
+                continue
+            mutated = residues.copy()
+            mutated[idx] = mutant_aa
+            p_mutant = _forward("".join(mutated))
+            delta_p = p_base - p_mutant
+            rows.append(
+                {
+                    "position": idx,
+                    "original_aa": original_aa,
+                    "mutant_aa": mutant_aa,
+                    "p_base": float(p_base),
+                    "p_mutant": float(p_mutant),
+                    "delta_p": float(delta_p),
+                    "reduces_allergenicity": bool(delta_p > 0),
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+# ── Stage 3 ────────────────────────────────────────────────────────────
+
+AA_PROPERTIES = {
+    "charge_positive": set("KRH"),
+    "charge_negative": set("DE"),
+    "hydrophobic": set("VILMFYWC"),
+    "polar_uncharged": set("STNQ"),
+    "special": set("GAP"),
+}
+
+
+def get_aa_property(aa: str) -> str:
+    for prop, aa_set in AA_PROPERTIES.items():
+        if aa in aa_set:
+            return prop
+    return "unknown"
+
+
+def annotate_mutagenesis_results(mut_df: pd.DataFrame) -> pd.DataFrame:
+    df = mut_df.copy()
+    df["original_property"] = df["original_aa"].map(get_aa_property)
+    df["mutant_property"] = df["mutant_aa"].map(get_aa_property)
+    df["property_change"] = df.apply(
+        lambda row: "same"
+        if row["original_property"] == row["mutant_property"]
+        else f"{row['original_property']} → {row['mutant_property']}",
+        axis=1,
+    )
+    return df
+
 
 def mean_metric_dicts(metric_rows: list[dict]) -> dict:
     return {

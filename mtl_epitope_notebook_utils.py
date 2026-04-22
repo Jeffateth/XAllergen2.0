@@ -40,6 +40,7 @@ from baseline_notebook_utils import (
     mean_metric_dicts,
     normalize_scores,
     parse_epitope_label,
+    serialize_score_array,
     tokenize_sequence,
 )
 
@@ -1095,6 +1096,7 @@ def run_probe_suite(
     model_name: str = HF_MODEL_NAME,
     resume: bool = True,
     save_every: int = 1,
+    precomputed_baseline_probe_df: pd.DataFrame | None = None,
 ) -> dict[str, pd.DataFrame]:
     ig_probe_device = device
     rng = np.random.default_rng(RANDOM_STATE)
@@ -1111,15 +1113,28 @@ def run_probe_suite(
 
     ig_model = model.to(ig_probe_device)
     ig_model.eval()
-    baseline_model, _ = load_baseline_checkpoint(
-        baseline_checkpoint_path,
-        ig_probe_device,
-        model_name=model_name,
-        hidden_dim=hidden_dim,
-        dropout=dropout,
-    )
-    baseline_ig_model = baseline_model
-    baseline_ig_model.eval()
+    baseline_model = None
+    baseline_ig_model = None
+    if precomputed_baseline_probe_df is None:
+        baseline_model, _ = load_baseline_checkpoint(
+            baseline_checkpoint_path,
+            ig_probe_device,
+            model_name=model_name,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+        )
+        baseline_ig_model = baseline_model
+        baseline_ig_model.eval()
+    else:
+        accession_column = "accession"
+        current_accessions = set(epitope_probe_df[accession_column].astype(str))
+        baseline_probe_rows = (
+            precomputed_baseline_probe_df.loc[
+                precomputed_baseline_probe_df[accession_column].astype(str).isin(current_accessions)
+            ]
+            .copy()
+            .to_dict("records")
+        )
 
     print(f"Integrated Gradients device: {ig_probe_device}")
     print(f"IG_STEPS: {ig_steps}")
@@ -1162,17 +1177,20 @@ def run_probe_suite(
             }
         )
 
-        baseline_attention_scores = compute_attention_weights(
-            baseline_model, tokenizer, sequence, ig_probe_device
-        )
-        baseline_probe_rows.append(
-            {
-                **base,
-                "model_family": output_paths.baseline_family_label,
-                "method": "attention_weights",
-                **compute_probe_metrics(epitope_labels, baseline_attention_scores),
-            }
-        )
+        if precomputed_baseline_probe_df is None:
+            baseline_attention_scores = compute_attention_weights(
+                baseline_model, tokenizer, sequence, ig_probe_device
+            )
+            baseline_probe_rows.append(
+                {
+                    **base,
+                    "model_family": output_paths.baseline_family_label,
+                    "method": "attention_weights",
+                    **compute_probe_metrics(epitope_labels, baseline_attention_scores),
+                }
+            )
+        else:
+            baseline_attention_scores = None
 
         ig_scores = compute_integrated_gradients(
             ig_model,
@@ -1188,6 +1206,7 @@ def run_probe_suite(
                 **base,
                 "model_family": output_paths.mtl_family_label,
                 "method": "integrated_gradients",
+                "ig_scores_json": serialize_score_array(ig_scores),
                 **compute_probe_metrics(epitope_labels, ig_scores),
             }
         )
@@ -1204,23 +1223,27 @@ def run_probe_suite(
             }
         )
 
-        baseline_ig_scores = compute_integrated_gradients(
-            baseline_ig_model,
-            tokenizer,
-            sequence,
-            ig_probe_device,
-            steps=ig_steps,
-            normalize=False,
-            internal_batch_size=ig_internal_batch_size,
-        )
-        baseline_probe_rows.append(
-            {
-                **base,
-                "model_family": output_paths.baseline_family_label,
-                "method": "integrated_gradients",
-                **compute_probe_metrics(epitope_labels, baseline_ig_scores),
-            }
-        )
+        if precomputed_baseline_probe_df is None:
+            baseline_ig_scores = compute_integrated_gradients(
+                baseline_ig_model,
+                tokenizer,
+                sequence,
+                ig_probe_device,
+                steps=ig_steps,
+                normalize=False,
+                internal_batch_size=ig_internal_batch_size,
+            )
+            baseline_probe_rows.append(
+                {
+                    **base,
+                    "model_family": output_paths.baseline_family_label,
+                    "method": "integrated_gradients",
+                    "ig_scores_json": serialize_score_array(baseline_ig_scores),
+                    **compute_probe_metrics(epitope_labels, baseline_ig_scores),
+                }
+            )
+        else:
+            baseline_ig_scores = None
 
         random_metrics = [
             compute_probe_metrics(epitope_labels, rng.uniform(0.0, 1.0, size=len(epitope_labels)))
@@ -1235,14 +1258,15 @@ def run_probe_suite(
                 **random_summary,
             }
         )
-        baseline_probe_rows.append(
-            {
-                **base,
-                "model_family": output_paths.baseline_family_label,
-                "method": "random_mean",
-                **random_summary,
-            }
-        )
+        if precomputed_baseline_probe_df is None:
+            baseline_probe_rows.append(
+                {
+                    **base,
+                    "model_family": output_paths.baseline_family_label,
+                    "method": "random_mean",
+                    **random_summary,
+                }
+            )
 
         del (
             residue_scores,
@@ -1269,8 +1293,10 @@ def run_probe_suite(
             processed_since_save = 0
 
     del ig_model
-    del baseline_ig_model
-    del baseline_model
+    if baseline_ig_model is not None:
+        del baseline_ig_model
+    if baseline_model is not None:
+        del baseline_model
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

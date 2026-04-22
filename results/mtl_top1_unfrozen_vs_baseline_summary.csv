@@ -1,4 +1,4 @@
-method,auroc_mean_baseline,auroc_sd_baseline,auprc_mean_baseline,auprc_sd_baseline,precision_at_k_mean_baseline,precision_at_k_sd_baseline,n_proteins_baseline,auroc_mean_mtl,auroc_sd_mtl,auprc_mean_mtl,auprc_sd_mtl,precision_at_k_mean_mtl,precision_at_k_sd_mtl,n_proteins_mtl,delta_auroc_mean,delta_auprc_mean,delta_precision_at_k_mean
-attention_weights,0.4438,0.1202,0.2468,0.1997,0.2131,0.2136,58,0.4477,0.1141,0.2467,0.1991,0.214,0.2142,58,0.0039,-0.0001,0.0009
-integrated_gradients,0.4328,0.1606,0.255,0.2067,0.2189,0.2244,58,0.4475,0.1629,0.2589,0.2096,0.2226,0.2276,58,0.0147,0.0039,0.0037
-random_mean,0.4997,0.0049,0.2692,0.1982,0.2512,0.1998,58,0.4997,0.0049,0.2692,0.1982,0.2512,0.1998,58,0.0,0.0,0.0
+method,auroc_mean_baseline,auroc_ci_low_baseline,auroc_ci_high_baseline,auprc_mean_baseline,auprc_ci_low_baseline,auprc_ci_high_baseline,precision_at_k_mean_baseline,precision_at_k_ci_low_baseline,precision_at_k_ci_high_baseline,n_proteins_baseline,auroc_mean_mtl,auroc_ci_low_mtl,auroc_ci_high_mtl,auprc_mean_mtl,auprc_ci_low_mtl,auprc_ci_high_mtl,precision_at_k_mean_mtl,precision_at_k_ci_low_mtl,precision_at_k_ci_high_mtl,n_proteins_mtl,delta_auroc_mean,delta_auprc_mean,delta_precision_at_k_mean
+attention_weights,0.4438,0.4151,0.4752,0.2468,0.1985,0.3008,0.2131,0.1622,0.2703,58,0.4477,0.4202,0.4783,0.2467,0.1988,0.2999,0.214,0.1623,0.2719,58,0.0039,-0.0001,0.0009
+integrated_gradients,0.4328,0.3932,0.4772,0.255,0.2046,0.3103,0.2189,0.1633,0.2776,58,0.4475,0.4059,0.4923,0.2589,0.2083,0.3147,0.2226,0.1663,0.2827,58,0.0147,0.0039,0.0037
+random_mean,0.4985,0.4969,0.5001,0.2683,0.2212,0.3212,0.2494,0.2021,0.3024,58,0.4997,0.4984,0.5009,0.2692,0.2218,0.3226,0.2512,0.2034,0.3041,58,0.0012,0.0009,0.0018
