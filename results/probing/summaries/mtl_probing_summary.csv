@@ -1,6 +1,15 @@
-method,auroc_mean,auroc_ci_low,auroc_ci_high,auprc_mean,auprc_ci_low,auprc_ci_high,precision_at_k_mean,precision_at_k_ci_low,precision_at_k_ci_high,n_proteins
-residue_head,0.6495,0.6047,0.6882,0.3735,0.3099,0.4416,0.3378,0.2723,0.4051,58
-attention_weights,0.4478,0.4211,0.4774,0.2462,0.1983,0.299,0.2126,0.1615,0.2699,58
-integrated_gradients,0.4434,0.4022,0.4886,0.2583,0.2075,0.3142,0.2218,0.1654,0.2821,58
-occlusion,0.4943,0.4748,0.5132,0.2691,0.2222,0.321,0.2398,0.191,0.2922,58
-random_mean,0.4997,0.4984,0.5009,0.2692,0.2218,0.3226,0.2512,0.2034,0.3041,58
+model_family,method,label_variant,method_category,auroc_mean,auroc_ci_low,auroc_ci_high,auprc_mean,auprc_ci_low,auprc_ci_high,precision_at_k_mean,precision_at_k_ci_low,precision_at_k_ci_high,n_proteins
+MTL (05 frozen),random_mean,original,Null baseline,0.5011,0.4993,0.5029,0.2697,0.2222,0.3226,0.2517,0.2041,0.3044,58
+MTL (05 frozen),random_mean,scrambled,Null baseline,0.5004,0.499,0.5019,0.269,0.222,0.3219,0.2515,0.2039,0.3044,58
+MTL (05 frozen),attention_weights,original,Model-internal signal,0.4478,0.4211,0.4774,0.2462,0.1983,0.299,0.2126,0.1615,0.2699,58
+MTL (05 frozen),attention_weights,scrambled,Model-internal signal,0.4997,0.4869,0.5129,0.2667,0.2178,0.3195,0.2483,0.1958,0.3024,58
+MTL (05 frozen),integrated_gradients,original,Post-hoc attribution,0.4434,0.4022,0.4886,0.2583,0.2075,0.3142,0.2218,0.1654,0.2821,58
+MTL (05 frozen),integrated_gradients,scrambled,Post-hoc attribution,0.492,0.4811,0.5025,0.2675,0.2206,0.3204,0.2453,0.1953,0.3003,58
+MTL (05 frozen),gradient_x_input,original,Post-hoc attribution,0.4746,0.4528,0.4984,0.2618,0.2155,0.3139,0.2515,0.2004,0.308,58
+MTL (05 frozen),gradient_x_input,scrambled,Post-hoc attribution,0.5063,0.4922,0.5206,0.271,0.2238,0.3229,0.2546,0.2075,0.3066,58
+MTL (05 frozen),smoothgrad_ig,original,Post-hoc attribution,0.4435,0.4022,0.4888,0.2587,0.2079,0.3147,0.2234,0.1679,0.2831,58
+MTL (05 frozen),smoothgrad_ig,scrambled,Post-hoc attribution,0.4921,0.4771,0.5067,0.2643,0.2156,0.3174,0.2485,0.1985,0.3025,58
+MTL (05 frozen),occlusion,original,Perturbation sensitivity,0.4943,0.4748,0.5132,0.2691,0.2222,0.321,0.2398,0.191,0.2922,58
+MTL (05 frozen),occlusion,scrambled,Perturbation sensitivity,0.5024,0.4896,0.5148,0.2708,0.2228,0.3235,0.2584,0.2082,0.3095,58
+MTL (05 frozen),residue_head,original,Supervised residue predictor,0.6495,0.6047,0.6882,0.3735,0.3099,0.4416,0.3378,0.2723,0.4051,58
+MTL (05 frozen),residue_head,scrambled,Supervised residue predictor,0.4929,0.4778,0.507,0.2652,0.2165,0.319,0.2479,0.1955,0.3028,58

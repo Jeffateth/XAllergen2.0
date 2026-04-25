@@ -2128,7 +2128,7 @@ def apply_paper_axis_style(
     xlabel: str,
     ylabel: str,
 ) -> None:
-    ax.set_title(title, fontsize=PAPER_TITLE_FONTSIZE, pad=18)
+    # Figure titles are intentionally omitted; captions should carry this context.
     ax.set_xlabel(xlabel, fontsize=PAPER_LABEL_FONTSIZE, labelpad=12)
     ax.set_ylabel(ylabel, fontsize=PAPER_LABEL_FONTSIZE, labelpad=12)
     ax.tick_params(axis="both", labelsize=PAPER_TICK_FONTSIZE)
