@@ -26,15 +26,17 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
-from baseline_notebook_utils import (
+from .baseline_notebook_utils import (
     ESM_MODEL_NAME,
     HF_MODEL_NAME,
     MAX_SEQ_LEN,
     RANDOM_STATE,
     THRESHOLD,
     compute_attention_weights,
+    compute_gradient_x_input_scores,
     compute_integrated_gradients,
     compute_residue_probabilities,
+    compute_smoothgrad_ig_scores,
     load_baseline_checkpoint,
     load_mtl_checkpoint,
     mean_metric_dicts,
@@ -987,6 +989,7 @@ def evaluate_saved_mtl_checkpoint(
         "test_residue_metrics": test_residue_metrics,
     }
 
+    ensure_output_parent(metrics_path)
     with metrics_path.open("w") as handle:
         json.dump(metrics_payload, handle, indent=2)
 
@@ -1045,7 +1048,7 @@ def compute_occlusion_scores_mtl(
     device: str,
 ) -> np.ndarray:
     """
-    Single-residue occlusion for MTL models.
+    Single-residue occlusion for any model with the shared classifier interface.
     Replaces residue i with mask token, records delta_p on the
     classification head output only (not the epitope head).
     Returns float32 array of shape (L,).
@@ -1081,6 +1084,126 @@ def compute_occlusion_scores_mtl(
     return delta_p
 
 
+def validate_probe_scores(
+    accession: str,
+    method: str,
+    model_family: str,
+    labels: np.ndarray,
+    scores: np.ndarray,
+) -> None:
+    labels = np.asarray(labels, dtype=np.float32)
+    scores = np.asarray(scores, dtype=np.float32)
+    if scores.shape != labels.shape:
+        raise ValueError(
+            f"{model_family} {method} for {accession} returned shape {scores.shape}, "
+            f"expected {labels.shape}."
+        )
+    if scores.size > 0 and np.isnan(scores).all():
+        raise ValueError(f"{model_family} {method} for {accession} returned only NaN scores.")
+
+
+def scramble_labels(labels: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """
+    Randomly permute residue labels within a protein.
+    Preserves sequence length and number of positive residues.
+    """
+    return rng.permutation(np.asarray(labels, dtype=np.float32))
+
+
+def validate_probe_metrics(labels: np.ndarray, metrics: dict[str, float]) -> None:
+    labels = np.asarray(labels, dtype=np.float32)
+    degenerate = labels.size == 0 or labels.sum() == 0 or labels.sum() == labels.size
+    if not degenerate:
+        for metric_name, metric_value in metrics.items():
+            if pd.isna(metric_value):
+                raise ValueError(f"{metric_name} is NaN for non-degenerate labels.")
+
+
+def build_probe_row(
+    base: dict[str, Any],
+    model_family: str,
+    method: str,
+    labels: np.ndarray,
+    scores: np.ndarray,
+    serialize_scores: bool = False,
+    score_column: str | None = None,
+    label_variant: str = "original",
+) -> dict[str, Any]:
+    validate_probe_scores(str(base["accession"]), method, model_family, labels, scores)
+    metrics = compute_probe_metrics(labels, scores)
+    validate_probe_metrics(labels, metrics)
+    row = {
+        **base,
+        "model_family": model_family,
+        "method": method,
+        "label_variant": label_variant,
+        **metrics,
+    }
+    if serialize_scores:
+        row["scores_json"] = serialize_score_array(scores)
+        if score_column is not None:
+            row[score_column] = row["scores_json"]
+    return row
+
+
+def build_probe_rows_with_label_scrambling(
+    base: dict[str, Any],
+    model_family: str,
+    method: str,
+    labels: np.ndarray,
+    scores: np.ndarray,
+    rng: np.random.Generator,
+    serialize_scores: bool = False,
+    score_column: str | None = None,
+) -> list[dict[str, Any]]:
+    scrambled_labels = scramble_labels(labels, rng)
+    return [
+        build_probe_row(
+            base,
+            model_family,
+            method,
+            labels,
+            scores,
+            serialize_scores=serialize_scores,
+            score_column=score_column,
+            label_variant="original",
+        ),
+        build_probe_row(
+            base,
+            model_family,
+            method,
+            scrambled_labels,
+            scores,
+            serialize_scores=serialize_scores,
+            score_column=score_column,
+            label_variant="scrambled",
+        ),
+    ]
+
+
+def ensure_label_variant_column(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = frame.copy()
+    if "label_variant" not in frame.columns:
+        frame["label_variant"] = "original"
+    frame["label_variant"] = frame["label_variant"].fillna("original").astype(str)
+    return frame
+
+
+def validate_unique_probe_rows(frame: pd.DataFrame) -> None:
+    if frame.empty:
+        return
+    frame = ensure_label_variant_column(frame)
+    duplicated = frame.duplicated(["accession", "method", "model_family", "label_variant"], keep=False)
+    if duplicated.any():
+        examples = frame.loc[
+            duplicated, ["accession", "method", "model_family", "label_variant"]
+        ].drop_duplicates().head(10)
+        raise ValueError(
+            "Duplicate probe rows found for accession/method/model_family/label_variant:\n"
+            f"{examples.to_string(index=False)}"
+        )
+
+
 def run_probe_suite(
     model,
     tokenizer,
@@ -1097,6 +1220,8 @@ def run_probe_suite(
     resume: bool = True,
     save_every: int = 1,
     precomputed_baseline_probe_df: pd.DataFrame | None = None,
+    smoothgrad_ig_samples: int = 10,
+    smoothgrad_ig_noise_std: float = 0.05,
 ) -> dict[str, pd.DataFrame]:
     ig_probe_device = device
     rng = np.random.default_rng(RANDOM_STATE)
@@ -1104,10 +1229,19 @@ def run_probe_suite(
         "residue_head",
         "attention_weights",
         "integrated_gradients",
+        "gradient_x_input",
+        "smoothgrad_ig",
         "occlusion",
         "random_mean",
     }
-    expected_baseline_methods = {"attention_weights", "integrated_gradients", "random_mean"}
+    expected_baseline_methods = {
+        "attention_weights",
+        "integrated_gradients",
+        "gradient_x_input",
+        "smoothgrad_ig",
+        "occlusion",
+        "random_mean",
+    }
     probe_rows = []
     baseline_probe_rows = []
 
@@ -1115,7 +1249,22 @@ def run_probe_suite(
     ig_model.eval()
     baseline_model = None
     baseline_ig_model = None
-    if precomputed_baseline_probe_df is None:
+    use_precomputed_baseline = False
+    if precomputed_baseline_probe_df is not None:
+        precomputed_baseline_probe_df = ensure_label_variant_column(precomputed_baseline_probe_df)
+        precomputed_methods = set(precomputed_baseline_probe_df["method"].astype(str))
+        precomputed_label_variants = set(precomputed_baseline_probe_df["label_variant"].astype(str))
+        missing_methods = expected_baseline_methods - precomputed_methods
+        missing_label_variants = {"original", "scrambled"} - precomputed_label_variants
+        use_precomputed_baseline = not missing_methods and not missing_label_variants
+        if missing_methods or missing_label_variants:
+            print(
+                "Precomputed baseline probe rows are missing methods or label variants "
+                f"(methods={sorted(missing_methods)}, label_variants={sorted(missing_label_variants)}); "
+                "recomputing baseline probes."
+            )
+
+    if not use_precomputed_baseline:
         baseline_model, _ = load_baseline_checkpoint(
             baseline_checkpoint_path,
             ig_probe_device,
@@ -1139,6 +1288,14 @@ def run_probe_suite(
     print(f"Integrated Gradients device: {ig_probe_device}")
     print(f"IG_STEPS: {ig_steps}")
     print(f"IG internal_batch_size: {ig_internal_batch_size}")
+    print(f"SmoothGrad-IG samples: {smoothgrad_ig_samples}")
+    print(f"SmoothGrad-IG noise_std: {smoothgrad_ig_noise_std}")
+    for output_path in [
+        output_paths.probe_rows_path,
+        output_paths.baseline_probe_rows_path,
+        output_paths.combined_probe_rows_path,
+    ]:
+        ensure_output_parent(output_path)
 
     gc.collect()
     if torch.cuda.is_available():
@@ -1158,36 +1315,32 @@ def run_probe_suite(
         }
 
         residue_scores = compute_residue_probabilities(ig_model, tokenizer, sequence, ig_probe_device)
-        probe_rows.append(
-            {
-                **base,
-                "model_family": output_paths.mtl_family_label,
-                "method": "residue_head",
-                **compute_probe_metrics(epitope_labels, residue_scores),
-            }
+        probe_rows.extend(
+            build_probe_rows_with_label_scrambling(
+                base, output_paths.mtl_family_label, "residue_head", epitope_labels, residue_scores, rng
+            )
         )
 
         attention_scores = compute_attention_weights(ig_model, tokenizer, sequence, ig_probe_device)
-        probe_rows.append(
-            {
-                **base,
-                "model_family": output_paths.mtl_family_label,
-                "method": "attention_weights",
-                **compute_probe_metrics(epitope_labels, attention_scores),
-            }
+        probe_rows.extend(
+            build_probe_rows_with_label_scrambling(
+                base, output_paths.mtl_family_label, "attention_weights", epitope_labels, attention_scores, rng
+            )
         )
 
-        if precomputed_baseline_probe_df is None:
+        if not use_precomputed_baseline:
             baseline_attention_scores = compute_attention_weights(
                 baseline_model, tokenizer, sequence, ig_probe_device
             )
-            baseline_probe_rows.append(
-                {
-                    **base,
-                    "model_family": output_paths.baseline_family_label,
-                    "method": "attention_weights",
-                    **compute_probe_metrics(epitope_labels, baseline_attention_scores),
-                }
+            baseline_probe_rows.extend(
+                build_probe_rows_with_label_scrambling(
+                    base,
+                    output_paths.baseline_family_label,
+                    "attention_weights",
+                    epitope_labels,
+                    baseline_attention_scores,
+                    rng,
+                )
             )
         else:
             baseline_attention_scores = None
@@ -1201,29 +1354,78 @@ def run_probe_suite(
             normalize=False,
             internal_batch_size=ig_internal_batch_size,
         )
-        probe_rows.append(
-            {
-                **base,
-                "model_family": output_paths.mtl_family_label,
-                "method": "integrated_gradients",
-                "ig_scores_json": serialize_score_array(ig_scores),
-                **compute_probe_metrics(epitope_labels, ig_scores),
-            }
+        probe_rows.extend(
+            build_probe_rows_with_label_scrambling(
+                base,
+                output_paths.mtl_family_label,
+                "integrated_gradients",
+                epitope_labels,
+                ig_scores,
+                rng,
+                serialize_scores=True,
+                score_column="ig_scores_json",
+            )
+        )
+
+        gradient_x_input_scores = compute_gradient_x_input_scores(
+            ig_model,
+            tokenizer,
+            sequence,
+            ig_probe_device,
+        )
+        probe_rows.extend(
+            build_probe_rows_with_label_scrambling(
+                base,
+                output_paths.mtl_family_label,
+                "gradient_x_input",
+                epitope_labels,
+                gradient_x_input_scores,
+                rng,
+                serialize_scores=True,
+                score_column="gradient_x_input_scores_json",
+            )
+        )
+
+        smoothgrad_ig_scores = compute_smoothgrad_ig_scores(
+            ig_model,
+            tokenizer,
+            sequence,
+            ig_probe_device,
+            steps=ig_steps,
+            n_samples=smoothgrad_ig_samples,
+            noise_std=smoothgrad_ig_noise_std,
+            internal_batch_size=ig_internal_batch_size,
+        )
+        probe_rows.extend(
+            build_probe_rows_with_label_scrambling(
+                base,
+                output_paths.mtl_family_label,
+                "smoothgrad_ig",
+                epitope_labels,
+                smoothgrad_ig_scores,
+                rng,
+                serialize_scores=True,
+                score_column="smoothgrad_ig_scores_json",
+            )
         )
 
         occlusion_scores = normalize_scores(
             compute_occlusion_scores_mtl(ig_model, tokenizer, sequence, ig_probe_device)
         )
-        probe_rows.append(
-            {
-                **base,
-                "model_family": output_paths.mtl_family_label,
-                "method": "occlusion",
-                **compute_probe_metrics(epitope_labels, occlusion_scores),
-            }
+        probe_rows.extend(
+            build_probe_rows_with_label_scrambling(
+                base,
+                output_paths.mtl_family_label,
+                "occlusion",
+                epitope_labels,
+                occlusion_scores,
+                rng,
+                serialize_scores=True,
+                score_column="occlusion_scores_json",
+            )
         )
 
-        if precomputed_baseline_probe_df is None:
+        if not use_precomputed_baseline:
             baseline_ig_scores = compute_integrated_gradients(
                 baseline_ig_model,
                 tokenizer,
@@ -1233,38 +1435,133 @@ def run_probe_suite(
                 normalize=False,
                 internal_batch_size=ig_internal_batch_size,
             )
-            baseline_probe_rows.append(
-                {
-                    **base,
-                    "model_family": output_paths.baseline_family_label,
-                    "method": "integrated_gradients",
-                    "ig_scores_json": serialize_score_array(baseline_ig_scores),
-                    **compute_probe_metrics(epitope_labels, baseline_ig_scores),
-                }
+            baseline_probe_rows.extend(
+                build_probe_rows_with_label_scrambling(
+                    base,
+                    output_paths.baseline_family_label,
+                    "integrated_gradients",
+                    epitope_labels,
+                    baseline_ig_scores,
+                    rng,
+                    serialize_scores=True,
+                    score_column="ig_scores_json",
+                )
+            )
+
+            baseline_gradient_x_input_scores = compute_gradient_x_input_scores(
+                baseline_ig_model,
+                tokenizer,
+                sequence,
+                ig_probe_device,
+            )
+            baseline_probe_rows.extend(
+                build_probe_rows_with_label_scrambling(
+                    base,
+                    output_paths.baseline_family_label,
+                    "gradient_x_input",
+                    epitope_labels,
+                    baseline_gradient_x_input_scores,
+                    rng,
+                    serialize_scores=True,
+                    score_column="gradient_x_input_scores_json",
+                )
+            )
+
+            baseline_smoothgrad_ig_scores = compute_smoothgrad_ig_scores(
+                baseline_ig_model,
+                tokenizer,
+                sequence,
+                ig_probe_device,
+                steps=ig_steps,
+                n_samples=smoothgrad_ig_samples,
+                noise_std=smoothgrad_ig_noise_std,
+                internal_batch_size=ig_internal_batch_size,
+            )
+            baseline_probe_rows.extend(
+                build_probe_rows_with_label_scrambling(
+                    base,
+                    output_paths.baseline_family_label,
+                    "smoothgrad_ig",
+                    epitope_labels,
+                    baseline_smoothgrad_ig_scores,
+                    rng,
+                    serialize_scores=True,
+                    score_column="smoothgrad_ig_scores_json",
+                )
+            )
+
+            baseline_occlusion_scores = normalize_scores(
+                compute_occlusion_scores_mtl(baseline_ig_model, tokenizer, sequence, ig_probe_device)
+            )
+            baseline_probe_rows.extend(
+                build_probe_rows_with_label_scrambling(
+                    base,
+                    output_paths.baseline_family_label,
+                    "occlusion",
+                    epitope_labels,
+                    baseline_occlusion_scores,
+                    rng,
+                    serialize_scores=True,
+                    score_column="occlusion_scores_json",
+                )
             )
         else:
             baseline_ig_scores = None
+            baseline_gradient_x_input_scores = None
+            baseline_smoothgrad_ig_scores = None
+            baseline_occlusion_scores = None
 
-        random_metrics = [
-            compute_probe_metrics(epitope_labels, rng.uniform(0.0, 1.0, size=len(epitope_labels)))
+        random_score_draws = [
+            rng.uniform(0.0, 1.0, size=len(epitope_labels))
             for _ in range(n_random_draws)
         ]
+        random_metrics = [
+            compute_probe_metrics(epitope_labels, random_scores)
+            for random_scores in random_score_draws
+        ]
+        random_scrambled_metrics = [
+            compute_probe_metrics(scramble_labels(epitope_labels, rng), random_scores)
+            for random_scores in random_score_draws
+        ]
         random_summary = mean_metric_dicts(random_metrics)
+        random_scrambled_summary = mean_metric_dicts(random_scrambled_metrics)
+        validate_probe_metrics(epitope_labels, random_summary)
+        validate_probe_metrics(epitope_labels, random_scrambled_summary)
         probe_rows.append(
             {
                 **base,
                 "model_family": output_paths.mtl_family_label,
                 "method": "random_mean",
+                "label_variant": "original",
                 **random_summary,
             }
         )
-        if precomputed_baseline_probe_df is None:
+        probe_rows.append(
+            {
+                **base,
+                "model_family": output_paths.mtl_family_label,
+                "method": "random_mean",
+                "label_variant": "scrambled",
+                **random_scrambled_summary,
+            }
+        )
+        if not use_precomputed_baseline:
             baseline_probe_rows.append(
                 {
                     **base,
                     "model_family": output_paths.baseline_family_label,
                     "method": "random_mean",
+                    "label_variant": "original",
                     **random_summary,
+                }
+            )
+            baseline_probe_rows.append(
+                {
+                    **base,
+                    "model_family": output_paths.baseline_family_label,
+                    "method": "random_mean",
+                    "label_variant": "scrambled",
+                    **random_scrambled_summary,
                 }
             )
 
@@ -1273,10 +1570,18 @@ def run_probe_suite(
             attention_scores,
             baseline_attention_scores,
             ig_scores,
+            gradient_x_input_scores,
+            smoothgrad_ig_scores,
             occlusion_scores,
             baseline_ig_scores,
+            baseline_gradient_x_input_scores,
+            baseline_smoothgrad_ig_scores,
+            baseline_occlusion_scores,
+            random_score_draws,
             random_metrics,
+            random_scrambled_metrics,
             random_summary,
+            random_scrambled_summary,
         )
         gc.collect()
         if torch.cuda.is_available():
@@ -1284,9 +1589,12 @@ def run_probe_suite(
 
         processed_since_save += 1
         if save_every > 0 and processed_since_save >= save_every:
-            probe_df = pd.DataFrame(probe_rows)
-            baseline_probe_df = pd.DataFrame(baseline_probe_rows)
-            combined_probe_df = pd.concat([baseline_probe_df, probe_df], ignore_index=True)
+            probe_df = ensure_label_variant_column(pd.DataFrame(probe_rows))
+            baseline_probe_df = ensure_label_variant_column(pd.DataFrame(baseline_probe_rows))
+            combined_probe_df = ensure_label_variant_column(pd.concat([baseline_probe_df, probe_df], ignore_index=True))
+            validate_unique_probe_rows(probe_df)
+            validate_unique_probe_rows(baseline_probe_df)
+            validate_unique_probe_rows(combined_probe_df)
             probe_df.to_csv(output_paths.probe_rows_path, index=False)
             baseline_probe_df.to_csv(output_paths.baseline_probe_rows_path, index=False)
             combined_probe_df.to_csv(output_paths.combined_probe_rows_path, index=False)
@@ -1301,9 +1609,12 @@ def run_probe_suite(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    probe_df = pd.DataFrame(probe_rows)
-    baseline_probe_df = pd.DataFrame(baseline_probe_rows)
-    combined_probe_df = pd.concat([baseline_probe_df, probe_df], ignore_index=True)
+    probe_df = ensure_label_variant_column(pd.DataFrame(probe_rows))
+    baseline_probe_df = ensure_label_variant_column(pd.DataFrame(baseline_probe_rows))
+    combined_probe_df = ensure_label_variant_column(pd.concat([baseline_probe_df, probe_df], ignore_index=True))
+    validate_unique_probe_rows(probe_df)
+    validate_unique_probe_rows(baseline_probe_df)
+    validate_unique_probe_rows(combined_probe_df)
 
     probe_df.to_csv(output_paths.probe_rows_path, index=False)
     baseline_probe_df.to_csv(output_paths.baseline_probe_rows_path, index=False)
@@ -1344,29 +1655,309 @@ def bootstrap_mean_ci(
     return mean_value, float(ci_low), float(ci_high)
 
 
+MAIN_LOCALIZATION_METHODS = ["random_mean", "integrated_gradients", "occlusion", "residue_head"]
+SUPPLEMENTARY_SIGNAL_METHODS = [
+    "random_mean",
+    "attention_weights",
+    "integrated_gradients",
+    "gradient_x_input",
+    "smoothgrad_ig",
+    "occlusion",
+    "residue_head",
+]
+
+
+METHOD_CATEGORY = {
+    "random_mean": "Null baseline",
+    "integrated_gradients": "Post-hoc attribution",
+    "gradient_x_input": "Post-hoc attribution",
+    "smoothgrad_ig": "Post-hoc attribution",
+    "occlusion": "Perturbation sensitivity",
+    "attention_weights": "Model-internal signal",
+    "residue_head": "Supervised residue predictor",
+}
+
+
+def classification_results_dir(results_dir: Path) -> Path:
+    return Path(results_dir) / "classification"
+
+
+def probe_rows_dir(results_dir: Path) -> Path:
+    return Path(results_dir) / "probing" / "rows"
+
+
+def probe_summaries_dir(results_dir: Path) -> Path:
+    return Path(results_dir) / "probing" / "summaries"
+
+
+def diagnostic_figures_dir(results_dir: Path) -> Path:
+    return Path(results_dir) / "figures" / "diagnostics"
+
+
+def ensure_output_parent(path: Path) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+def ensure_publication_results_tree(results_dir: Path) -> dict[str, Path]:
+    paths = {
+        "classification": classification_results_dir(results_dir),
+        "probe_rows": probe_rows_dir(results_dir),
+        "probe_summaries": probe_summaries_dir(results_dir),
+        "main_figures": Path(results_dir) / "figures" / "main",
+        "supplementary_figures": Path(results_dir) / "figures" / "supplementary",
+        "diagnostic_figures": diagnostic_figures_dir(results_dir),
+        "insilico_mutagenesis": Path(results_dir) / "insilico_mutagenesis",
+    }
+    for path in paths.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return paths
+
+
+def original_label_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = ensure_label_variant_column(frame)
+    return frame.loc[frame["label_variant"] == "original"].copy()
+
+
 def summarize_probe_methods(frame: pd.DataFrame, methods: list[str]) -> pd.DataFrame:
+    frame = ensure_label_variant_column(frame)
     summary_rows = []
-    for method in methods:
-        method_df = frame[frame["method"] == method]
+    group_cols = ["method", "label_variant"]
+    if "model_family" in frame.columns:
+        group_cols = ["model_family", "method", "label_variant"]
+
+    for group_key, method_df in frame[frame["method"].isin(methods)].groupby(group_cols, dropna=False):
+        if "model_family" in group_cols:
+            model_family, method, label_variant = group_key
+        else:
+            model_family = None
+            method, label_variant = group_key
         auroc_mean, auroc_ci_low, auroc_ci_high = bootstrap_mean_ci(method_df["auroc"])
         auprc_mean, auprc_ci_low, auprc_ci_high = bootstrap_mean_ci(method_df["auprc"])
         precision_mean, precision_ci_low, precision_ci_high = bootstrap_mean_ci(method_df["precision_at_k"])
-        summary_rows.append(
+        row = {
+            "method": method,
+            "label_variant": label_variant,
+            "method_category": METHOD_CATEGORY.get(method, "Uncategorized"),
+            "auroc_mean": round(auroc_mean, 4),
+            "auroc_ci_low": round(auroc_ci_low, 4),
+            "auroc_ci_high": round(auroc_ci_high, 4),
+            "auprc_mean": round(auprc_mean, 4),
+            "auprc_ci_low": round(auprc_ci_low, 4),
+            "auprc_ci_high": round(auprc_ci_high, 4),
+            "precision_at_k_mean": round(precision_mean, 4),
+            "precision_at_k_ci_low": round(precision_ci_low, 4),
+            "precision_at_k_ci_high": round(precision_ci_high, 4),
+            "n_proteins": int(method_df["accession"].nunique()) if "accession" in method_df else int(len(method_df)),
+        }
+        if model_family is not None:
+            row = {"model_family": model_family, **row}
+        summary_rows.append(row)
+    summary_df = pd.DataFrame(summary_rows)
+    if summary_df.empty:
+        return summary_df
+    method_rank = {method: idx for idx, method in enumerate(methods)}
+    summary_df["_method_rank"] = summary_df["method"].map(method_rank)
+    summary_df["_label_rank"] = summary_df["label_variant"].map({"original": 0, "scrambled": 1}).fillna(2)
+    sort_cols = ["_method_rank"]
+    if "model_family" in summary_df.columns:
+        family_rank = {family: idx for idx, family in enumerate(DEFAULT_FAMILY_ORDER)}
+        summary_df["_family_rank"] = summary_df["model_family"].map(family_rank).fillna(len(family_rank))
+        sort_cols = ["_family_rank", "_method_rank", "_label_rank"]
+    else:
+        sort_cols = ["_method_rank", "_label_rank"]
+    summary_df = summary_df.sort_values(sort_cols).drop(columns=[col for col in ["_family_rank", "_method_rank", "_label_rank"] if col in summary_df])
+    return summary_df.reset_index(drop=True)
+
+
+def save_localization_summary_csvs(
+    combined_probe_df: pd.DataFrame,
+    output_dir: Path,
+) -> dict[str, pd.DataFrame]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    original_df = original_label_rows(combined_probe_df)
+    main_summary_df = summarize_probe_methods(original_df, MAIN_LOCALIZATION_METHODS)
+    supplementary_summary_df = summarize_probe_methods(original_df, SUPPLEMENTARY_SIGNAL_METHODS)
+    scrambling_summary_df = summarize_probe_methods(combined_probe_df, SUPPLEMENTARY_SIGNAL_METHODS)
+    main_summary_path = output_dir / "main_localization_summary.csv"
+    supplementary_summary_path = output_dir / "supplementary_all_signals_summary.csv"
+    scrambling_summary_path = output_dir / "probe_summary_with_scrambling.csv"
+    main_summary_df.to_csv(main_summary_path, index=False)
+    supplementary_summary_df.to_csv(supplementary_summary_path, index=False)
+    scrambling_summary_df.to_csv(scrambling_summary_path, index=False)
+    print(f"Saved main localization summary to: {main_summary_path}")
+    print(f"Saved supplementary all-signals summary to: {supplementary_summary_path}")
+    print(f"Saved label-scrambling summary to: {scrambling_summary_path}")
+    return {
+        "main_summary_df": main_summary_df,
+        "supplementary_summary_df": supplementary_summary_df,
+        "scrambling_summary_df": scrambling_summary_df,
+    }
+
+
+PROBE_FAMILY_LABEL_OVERRIDES = {
+    "baseline": "Baseline (04)",
+    "frozen": "MTL (05 frozen)",
+    "top1_unfrozen": "MTL (06 top1_unfrozen)",
+}
+
+
+def infer_probe_variant_from_checkpoint_name(checkpoint_name: str) -> tuple[str | None, str | None]:
+    if checkpoint_name == "baseline_frozen_esm2.pt":
+        return "baseline", PROBE_FAMILY_LABEL_OVERRIDES["baseline"]
+    if checkpoint_name == "mtl_frozen_esm2_epitope.pt":
+        return "frozen", PROBE_FAMILY_LABEL_OVERRIDES["frozen"]
+    if checkpoint_name.startswith("mtl_") and checkpoint_name.endswith("_esm2_epitope.pt"):
+        variant = checkpoint_name[len("mtl_") : -len("_esm2_epitope.pt")]
+        if variant:
+            return variant, PROBE_FAMILY_LABEL_OVERRIDES.get(variant, f"MTL ({variant})")
+    return None, None
+
+
+def probe_rows_path_for_variant(results_dir: Path, variant: str) -> Path:
+    rows_dir = probe_rows_dir(results_dir)
+    if variant == "baseline":
+        return rows_dir / "baseline_probing_rows.csv"
+    if variant == "frozen":
+        return rows_dir / "mtl_probing_rows.csv"
+    return rows_dir / f"mtl_{variant}_probing_rows.csv"
+
+
+def legacy_probe_rows_path_for_variant(results_dir: Path, variant: str) -> Path:
+    if variant == "baseline":
+        return Path(results_dir) / "baseline_probing_rows.csv"
+    if variant == "frozen":
+        return Path(results_dir) / "mtl_probing_rows.csv"
+    return Path(results_dir) / f"mtl_{variant}_probing_rows.csv"
+
+
+def discover_probe_row_artifacts(models_dir: Path, results_dir: Path) -> pd.DataFrame:
+    records = []
+    for checkpoint_path in sorted(models_dir.glob("*.pt")):
+        variant, default_label = infer_probe_variant_from_checkpoint_name(checkpoint_path.name)
+        if variant is None:
+            continue
+        probe_rows_path = probe_rows_path_for_variant(results_dir, variant)
+        if not probe_rows_path.exists():
+            legacy_path = legacy_probe_rows_path_for_variant(results_dir, variant)
+            if legacy_path.exists():
+                probe_rows_path = legacy_path
+        records.append(
             {
-                "method": method,
-                "auroc_mean": round(auroc_mean, 4),
-                "auroc_ci_low": round(auroc_ci_low, 4),
-                "auroc_ci_high": round(auroc_ci_high, 4),
-                "auprc_mean": round(auprc_mean, 4),
-                "auprc_ci_low": round(auprc_ci_low, 4),
-                "auprc_ci_high": round(auprc_ci_high, 4),
-                "precision_at_k_mean": round(precision_mean, 4),
-                "precision_at_k_ci_low": round(precision_ci_low, 4),
-                "precision_at_k_ci_high": round(precision_ci_high, 4),
-                "n_proteins": int(len(method_df)),
+                "checkpoint_name": checkpoint_path.name,
+                "variant": variant,
+                "model_family": default_label,
+                "checkpoint_path": checkpoint_path,
+                "probe_rows_path": probe_rows_path,
+                "probe_rows_exists": probe_rows_path.exists(),
             }
         )
-    return pd.DataFrame(summary_rows)
+    return pd.DataFrame(records)
+
+
+def load_available_probe_rows(discovery_df: pd.DataFrame) -> pd.DataFrame:
+    available_df = discovery_df.loc[discovery_df["probe_rows_exists"]].copy()
+    if available_df.empty:
+        raise FileNotFoundError("No matching probe-row CSVs were found. Generate probe artifacts first.")
+
+    frames = []
+    for row in available_df.itertuples(index=False):
+        header = pd.read_csv(row.probe_rows_path, nrows=0)
+        columns = [
+            "accession",
+            "seq_len",
+            "epitope_density",
+            "n_epitope_residues",
+            "model_family",
+            "method",
+            "label_variant",
+            "auroc",
+            "auprc",
+            "precision_at_k",
+        ]
+        frame = ensure_label_variant_column(
+            pd.read_csv(row.probe_rows_path, usecols=[column for column in columns if column in header.columns])
+        )
+        family_label = PROBE_FAMILY_LABEL_OVERRIDES.get(row.variant, row.model_family)
+        frame = frame.copy()
+        frame["model_family"] = family_label
+        frame["source_probe_rows_path"] = str(row.probe_rows_path)
+        frames.append(frame)
+
+    combined_df = ensure_label_variant_column(pd.concat(frames, ignore_index=True))
+    validate_unique_probe_rows(combined_df)
+    return combined_df
+
+
+def save_combined_probe_tables(
+    combined_probe_df: pd.DataFrame,
+    output_dir: Path,
+) -> dict[str, pd.DataFrame | Path]:
+    ensure_publication_results_tree(output_dir)
+    combined_probe_df = ensure_label_variant_column(combined_probe_df)
+    rows_path = probe_rows_dir(output_dir) / "all_models_probing_rows.csv"
+    summary_path = probe_summaries_dir(output_dir) / "all_models_probing_summary.csv"
+    combined_probe_df.to_csv(rows_path, index=False)
+    summary_df = summarize_probe_methods(combined_probe_df, SUPPLEMENTARY_SIGNAL_METHODS)
+    summary_df.to_csv(summary_path, index=False)
+    summary_payload = save_localization_summary_csvs(combined_probe_df, probe_summaries_dir(output_dir))
+    return {
+        "rows_path": rows_path,
+        "summary_path": summary_path,
+        "summary_df": summary_df,
+        **summary_payload,
+    }
+
+
+def render_probe_figures_from_rows(
+    combined_probe_df: pd.DataFrame,
+    output_dir: Path,
+) -> dict[str, Path]:
+    combined_probe_df = ensure_label_variant_column(combined_probe_df)
+    ensure_publication_results_tree(output_dir)
+    main_dir = output_dir / "figures" / "main"
+    supplementary_dir = output_dir / "figures" / "supplementary"
+    main_dir.mkdir(parents=True, exist_ok=True)
+    supplementary_dir.mkdir(parents=True, exist_ok=True)
+
+    main_base = main_dir / "main_localization.png"
+    supplementary_base = supplementary_dir / "supplementary_all_signals.png"
+    scrambling_base = supplementary_dir / "label_scrambling_sanity_check.png"
+    plot_main_localization_figure(combined_probe_df, main_base)
+    plot_supplementary_all_signals_figure(combined_probe_df, supplementary_base)
+    plot_label_scrambling_sanity_check(combined_probe_df, scrambling_base)
+
+    return {
+        "main_dir": main_dir,
+        "supplementary_dir": supplementary_dir,
+        "main_base": main_base,
+        "supplementary_base": supplementary_base,
+        "scrambling_base": scrambling_base,
+    }
+
+
+def replot_probe_figures_from_csv(
+    rows_csv: Path,
+    output_dir: Path | None = None,
+) -> dict[str, Path]:
+    rows_csv = Path(rows_csv)
+    if output_dir is None:
+        output_dir = rows_csv.parents[2] if "probing" in rows_csv.parts else rows_csv.parent
+    header = pd.read_csv(rows_csv, nrows=0)
+    plotting_columns = [
+        "accession",
+        "seq_len",
+        "epitope_density",
+        "n_epitope_residues",
+        "model_family",
+        "method",
+        "label_variant",
+        "auroc",
+        "auprc",
+        "precision_at_k",
+    ]
+    usecols = [column for column in plotting_columns if column in header.columns]
+    combined_probe_df = ensure_label_variant_column(pd.read_csv(rows_csv, usecols=usecols))
+    return render_probe_figures_from_rows(combined_probe_df, Path(output_dir))
 
 
 def summarize_probe_outputs(
@@ -1376,19 +1967,41 @@ def summarize_probe_outputs(
 ) -> dict[str, pd.DataFrame]:
     summary_df = summarize_probe_methods(
         probe_df,
-        ["residue_head", "attention_weights", "integrated_gradients", "occlusion", "random_mean"],
+        SUPPLEMENTARY_SIGNAL_METHODS,
     )
     baseline_summary_df = summarize_probe_methods(
         baseline_probe_df,
-        ["attention_weights", "integrated_gradients", "random_mean"],
+        [method for method in SUPPLEMENTARY_SIGNAL_METHODS if method != "residue_head"],
     )
+    ensure_output_parent(output_paths.probe_summary_path)
+    ensure_output_parent(output_paths.compare_summary_path)
     summary_df.to_csv(output_paths.probe_summary_path, index=False)
     print(summary_df.to_string(index=False))
     print(f"Saved summary to: {output_paths.probe_summary_path}")
 
-    comparable_methods = ["attention_weights", "integrated_gradients", "random_mean"]
-    comparison_df = baseline_summary_df.merge(
-        summary_df[summary_df["method"].isin(comparable_methods)],
+    save_localization_summary_csvs(
+        pd.concat([baseline_probe_df, probe_df], ignore_index=True),
+        output_paths.probe_summary_path.parent,
+    )
+
+    comparable_methods = [
+        "attention_weights",
+        "integrated_gradients",
+        "gradient_x_input",
+        "smoothgrad_ig",
+        "occlusion",
+        "random_mean",
+    ]
+    baseline_comparison_df = baseline_summary_df.loc[
+        baseline_summary_df["label_variant"].eq("original")
+        & baseline_summary_df["method"].isin(comparable_methods)
+    ]
+    mtl_comparison_df = summary_df.loc[
+        summary_df["label_variant"].eq("original")
+        & summary_df["method"].isin(comparable_methods)
+    ]
+    comparison_df = baseline_comparison_df.merge(
+        mtl_comparison_df,
         on="method",
         suffixes=("_baseline", "_mtl"),
     )
@@ -1409,18 +2022,22 @@ def summarize_probe_outputs(
 
 
 PALETTE = {
+    "random_mean": "#55A868",
     "attention_weights": "#4C72B0",
     "integrated_gradients": "#DD8452",
+    "gradient_x_input": "#64B5CD",
+    "smoothgrad_ig": "#C44E52",
     "occlusion": "#8172B3",
-    "random_mean": "#55A868",
-    "residue_head": "#C44E52",
+    "residue_head": "#937860",
 }
 METHOD_XLABELS = {
-    "attention_weights": "Attention\nWeights",
+    "random_mean": "Random",
     "integrated_gradients": "Integrated\nGradients",
+    "gradient_x_input": "Gradient ×\nInput",
+    "smoothgrad_ig": "SmoothGrad-\nIG",
     "occlusion": "Occlusion",
-    "random_mean": "Random\nMean",
-    "residue_head": "Residue\nHead (MTL)",
+    "attention_weights": "Attention\nPooling",
+    "residue_head": "MTL\nResidue Head",
 }
 DEFAULT_FAMILY_ORDER = ["Baseline (04)", "MTL (05)", "MTL (05 frozen)", "MTL (06 top1_unfrozen)"]
 DEFAULT_FAMILY_LINESTYLE = {
@@ -1435,6 +2052,14 @@ DEFAULT_FAMILY_MARKER = {
     "MTL (05 frozen)": "^",
     "MTL (06 top1_unfrozen)": "s",
 }
+PAPER_FIGSIZE = (12, 8)
+PAPER_WIDE_FIGSIZE = (15, 8.5)
+PAPER_TITLE_FONTSIZE = 24
+PAPER_LABEL_FONTSIZE = 22
+PAPER_TICK_FONTSIZE = 18
+PAPER_LEGEND_FONTSIZE = 16
+PAPER_LEGEND_TITLE_FONTSIZE = 17
+PAPER_ANNOTATION_FONTSIZE = 16
 
 
 def get_family_order(combined_probe_df: pd.DataFrame) -> list[str]:
@@ -1492,12 +2117,282 @@ def describe_marker(marker: str) -> str:
     return marker_names.get(marker, marker)
 
 
+def metric_out_path(out_path: Path, metric_col: str) -> Path:
+    out_path = Path(out_path)
+    return out_path.with_name(f"{out_path.stem}_{metric_col}{out_path.suffix}")
+
+
+def apply_paper_axis_style(
+    ax,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+) -> None:
+    ax.set_title(title, fontsize=PAPER_TITLE_FONTSIZE, pad=18)
+    ax.set_xlabel(xlabel, fontsize=PAPER_LABEL_FONTSIZE, labelpad=12)
+    ax.set_ylabel(ylabel, fontsize=PAPER_LABEL_FONTSIZE, labelpad=12)
+    ax.tick_params(axis="both", labelsize=PAPER_TICK_FONTSIZE)
+    ax.grid(axis="y", alpha=0.25, linewidth=0.8)
+
+
+def set_method_xticklabels(ax, methods: list[str]) -> None:
+    ax.set_xticks(
+        range(len(methods)),
+        [METHOD_XLABELS.get(method, method) for method in methods],
+        fontsize=PAPER_TICK_FONTSIZE,
+    )
+
+
+def style_legend(ax, title: str | None = None) -> None:
+    legend = ax.get_legend()
+    if legend is None:
+        return
+    if title is not None:
+        legend.set_title(title)
+    legend.get_title().set_fontsize(PAPER_LEGEND_TITLE_FONTSIZE)
+    for text in legend.get_texts():
+        text.set_fontsize(PAPER_LEGEND_FONTSIZE)
+
+
+def _save_png_and_pdf(fig, out_path: Path) -> None:
+    out_path = Path(out_path)
+    png_path = out_path.with_suffix(".png")
+    pdf_path = out_path.with_suffix(".pdf")
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    try:
+        fig.savefig(pdf_path, bbox_inches="tight")
+        print(f"Saved plot to: {png_path}")
+        print(f"Saved plot to: {pdf_path}")
+    except Exception as exc:
+        print(f"Saved plot to: {png_path}")
+        print(f"Could not save PDF to {pdf_path}: {exc}")
+
+
+def print_localization_caption_drafts() -> None:
+    print("\nMain figure caption draft:")
+    print(
+        "We compare a null random baseline, post-hoc protein-level explanations "
+        "(Integrated Gradients and occlusion sensitivity), and a supervised MTL "
+        "residue-level epitope head. Metrics are computed per protein against IEDB "
+        "epitope annotations and averaged across proteins. Attention-pooling weights "
+        "and additional gradient variants are reported in Supplementary Fig. X because "
+        "they represent model-internal signals or robustness checks rather than the "
+        "core attribution comparison."
+    )
+    print("\nSupplementary caption draft:")
+    print(
+        "Additional residue-level signals include attention-pooling weights, Gradient "
+        "× Input, and SmoothGrad-IG. Similar near-random performance across multiple "
+        "attribution families would indicate that poor epitope localization is not "
+        "specific to a single attribution algorithm."
+    )
+
+
+def _plot_localization_figure(
+    combined_probe_df: pd.DataFrame,
+    out_path: Path,
+    methods: list[str],
+    title: str,
+    figsize: tuple[float, float],
+) -> None:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    plot_df = original_label_rows(combined_probe_df)
+    plot_df = plot_df[plot_df["method"].isin(methods)].copy()
+    if plot_df.empty:
+        raise ValueError("No rows available for requested localization methods.")
+
+    family_order = get_family_order(plot_df)
+    metrics_config = [
+        ("auroc", "AUROC"),
+        ("auprc", "AUPRC"),
+        ("precision_at_k", "Precision@k"),
+    ]
+    palette = {method: PALETTE[method] for method in methods if method in PALETTE}
+
+    for metric_col, metric_label in metrics_config:
+        metric_df = plot_df.dropna(subset=[metric_col]).copy()
+        fig, ax = plt.subplots(figsize=figsize)
+        sns.violinplot(
+            data=metric_df,
+            x="method",
+            y=metric_col,
+            order=methods,
+            hue="method",
+            palette=palette,
+            inner=None,
+            cut=0,
+            linewidth=1.0,
+            legend=False,
+            ax=ax,
+        )
+        sns.stripplot(
+            data=metric_df,
+            x="method",
+            y=metric_col,
+            order=methods,
+            hue="model_family",
+            hue_order=family_order,
+            dodge=True,
+            alpha=0.45,
+            size=3.5,
+            jitter=0.18,
+            ax=ax,
+        )
+        random_values = metric_df.loc[metric_df["method"] == "random_mean", metric_col]
+        if not random_values.empty:
+            ax.axhline(
+                float(random_values.mean()),
+                color="dimgray",
+                linestyle="--",
+                linewidth=1.2,
+                alpha=0.9,
+            )
+        apply_paper_axis_style(ax, f"{title}: {metric_label}", "", metric_label)
+        set_method_xticklabels(ax, methods)
+        handles, labels = ax.get_legend_handles_labels()
+        unique = dict(zip(labels, handles))
+        ax.legend(unique.values(), unique.keys(), title="Model", loc="best")
+        style_legend(ax, title="Model")
+        fig.tight_layout()
+        _save_png_and_pdf(fig, metric_out_path(Path(out_path), metric_col))
+        plt.close(fig)
+    print_localization_caption_drafts()
+
+
+def warn_label_scrambling_sanity_check(
+    probe_df: pd.DataFrame,
+    tolerance: float = 0.05,
+) -> None:
+    frame = ensure_label_variant_column(probe_df)
+    scrambled_df = frame.loc[frame["label_variant"] == "scrambled"].copy()
+    if scrambled_df.empty:
+        print("Label scrambling sanity check warning: no scrambled-label rows found.")
+        return
+
+    group_cols = ["method"]
+    if "model_family" in scrambled_df.columns:
+        group_cols = ["model_family", "method"]
+
+    for group_key, group_df in scrambled_df.groupby(group_cols, dropna=False):
+        if isinstance(group_key, tuple):
+            label = " / ".join(str(value) for value in group_key)
+        else:
+            label = str(group_key)
+        mean_auroc = float(group_df["auroc"].dropna().mean())
+        mean_auprc = float(group_df["auprc"].dropna().mean())
+        expected_auprc = float(group_df["epitope_density"].dropna().mean())
+        auroc_failed = not math.isnan(mean_auroc) and abs(mean_auroc - 0.5) >= tolerance
+        auprc_failed = (
+            not math.isnan(mean_auprc)
+            and not math.isnan(expected_auprc)
+            and abs(mean_auprc - expected_auprc) >= tolerance
+        )
+        if auroc_failed or auprc_failed:
+            print(
+                "Sanity check failed: metrics not collapsing under label scrambling "
+                f"for {label}. AUROC={mean_auroc:.3f} (expected 0.500), "
+                f"AUPRC={mean_auprc:.3f} (expected {expected_auprc:.3f})."
+            )
+
+
+def plot_label_scrambling_sanity_check(probe_df: pd.DataFrame, out_path: Path) -> None:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    frame = ensure_label_variant_column(probe_df)
+    methods = [method for method in SUPPLEMENTARY_SIGNAL_METHODS if method in set(frame["method"])]
+    plot_df = frame.loc[
+        frame["method"].isin(methods)
+        & frame["label_variant"].isin(["original", "scrambled"])
+    ].copy()
+    if plot_df.empty or "scrambled" not in set(plot_df["label_variant"]):
+        print("Label scrambling sanity check skipped: no scrambled-label rows found.")
+        return
+
+    metrics_config = [
+        ("auroc", "AUROC"),
+        ("auprc", "AUPRC"),
+        ("precision_at_k", "Precision@k"),
+    ]
+    label_palette = {"original": "#4C72B0", "scrambled": "#999999"}
+
+    for metric_col, metric_label in metrics_config:
+        metric_df = plot_df.dropna(subset=[metric_col]).copy()
+        fig, ax = plt.subplots(figsize=PAPER_WIDE_FIGSIZE)
+        sns.violinplot(
+            data=metric_df,
+            x="method",
+            y=metric_col,
+            hue="label_variant",
+            order=methods,
+            hue_order=["original", "scrambled"],
+            palette=label_palette,
+            inner=None,
+            cut=0,
+            linewidth=1.0,
+            dodge=True,
+            ax=ax,
+        )
+        sns.stripplot(
+            data=metric_df,
+            x="method",
+            y=metric_col,
+            hue="label_variant",
+            order=methods,
+            hue_order=["original", "scrambled"],
+            palette=label_palette,
+            dodge=True,
+            alpha=0.35,
+            size=3.0,
+            jitter=0.18,
+            ax=ax,
+        )
+        apply_paper_axis_style(ax, f"Sanity Check: Label Scrambling ({metric_label})", "", metric_label)
+        set_method_xticklabels(ax, methods)
+        handles, labels = ax.get_legend_handles_labels()
+        unique = dict(zip(labels, handles))
+        ax.legend(unique.values(), unique.keys(), title="Labels", loc="best")
+        style_legend(ax, title="Labels")
+        fig.tight_layout()
+        _save_png_and_pdf(fig, metric_out_path(Path(out_path), metric_col))
+        plt.close(fig)
+    warn_label_scrambling_sanity_check(frame)
+    print(
+        "Label scrambling sanity check:\n"
+        "All methods should collapse to chance-level performance if the evaluation is well-calibrated.\n"
+        "If not, metric bias or leakage may be present."
+    )
+
+
+def plot_main_localization_figure(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
+    _plot_localization_figure(
+        combined_probe_df,
+        out_path,
+        MAIN_LOCALIZATION_METHODS,
+        "Residue-Level Localization vs. IEDB Epitopes",
+        figsize=PAPER_FIGSIZE,
+    )
+
+
+def plot_supplementary_all_signals_figure(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
+    _plot_localization_figure(
+        combined_probe_df,
+        out_path,
+        SUPPLEMENTARY_SIGNAL_METHODS,
+        "All Residue-Level Signals vs. IEDB Epitopes",
+        figsize=PAPER_WIDE_FIGSIZE,
+    )
+
+
 def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
     import matplotlib.pyplot as plt
     import seaborn as sns
 
     violin_order = ["attention_weights", "integrated_gradients", "occlusion", "random_mean", "residue_head"]
-    violin_df = combined_probe_df[combined_probe_df["method"].isin(violin_order)].copy()
+    violin_df = original_label_rows(combined_probe_df)
+    violin_df = violin_df[violin_df["method"].isin(violin_order)].copy()
     family_order = get_family_order(violin_df)
     family_linestyle, _ = get_family_styles(family_order)
     metrics_config = [
@@ -1506,10 +2401,9 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
         ("precision_at_k", "Precision@k"),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-
-    for ax, (col, label) in zip(axes, metrics_config):
+    for col, label in metrics_config:
         plot_data = violin_df.dropna(subset=[col]).copy()
+        fig, ax = plt.subplots(figsize=PAPER_WIDE_FIGSIZE)
 
         sns.violinplot(
             data=plot_data,
@@ -1551,26 +2445,22 @@ def plot_probe_violins(combined_probe_df: pd.DataFrame, out_path: Path) -> None:
                 )
 
         overall_mean, overall_ci_low, overall_ci_high = bootstrap_mean_ci(plot_data[col])
-        ax.set_title(
-            f"{label}\nmean [95% bootstrap CI]: {overall_mean:.3f} [{overall_ci_low:.3f}, {overall_ci_high:.3f}]",
-            fontsize=11,
+        apply_paper_axis_style(
+            ax,
+            f"Residue Attribution Faithfulness: {label}\nmean [95% CI]: {overall_mean:.3f} [{overall_ci_low:.3f}, {overall_ci_high:.3f}]",
+            "Method",
+            label,
         )
-        ax.set_xlabel("Method")
-        ax.set_ylabel(label)
-        ax.set_xticklabels([METHOD_XLABELS[m] for m in violin_order], fontsize=9)
+        set_method_xticklabels(ax, violin_order)
 
         handles, labels = ax.get_legend_handles_labels()
         unique = dict(zip(labels, handles))
-        if ax is axes[0]:
-            ax.legend(unique.values(), unique.keys(), title="Model family", fontsize=8)
-        else:
-            ax.legend().remove()
+        ax.legend(unique.values(), unique.keys(), title="Model family", loc="best")
+        style_legend(ax, title="Model family")
 
-    plt.suptitle("Residue Attribution Faithfulness vs. IEDB Epitopes", fontsize=13, y=1.02)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.show()
-    print(f"Saved plot to: {out_path}")
+        fig.tight_layout()
+        _save_png_and_pdf(fig, metric_out_path(Path(out_path), col))
+        plt.close(fig)
 
 
 def plot_probe_paired_deltas(
@@ -1597,6 +2487,7 @@ def plot_probe_paired_deltas(
         if compare_family is None:
             raise ValueError("No non-baseline model_family available for paired delta plotting.")
 
+    combined_probe_df = original_label_rows(combined_probe_df)
     plot_df = combined_probe_df[
         combined_probe_df["model_family"].isin([baseline_family, compare_family])
     ].copy()
@@ -1652,7 +2543,7 @@ def plot_probe_paired_deltas(
     method_order = [method for method in preferred_order if method in set(delta_df["method"])]
     palette = {method: PALETTE[method] for method in method_order}
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=PAPER_FIGSIZE)
     sns.violinplot(
         data=delta_df,
         x="method",
@@ -1694,13 +2585,13 @@ def plot_probe_paired_deltas(
         ax.legend_.remove()
 
     ax.axhline(0.0, color="gray", linestyle="--", linewidth=1.2, alpha=0.9)
-    ax.set_xlabel("Method")
-    ax.set_ylabel(f"Δ{metric_labels[metric]}")
-    ax.set_xticklabels([METHOD_XLABELS.get(method, method) for method in method_order], fontsize=9)
-    ax.set_title(
+    apply_paper_axis_style(
+        ax,
         f"Per-protein Δ{metric_labels[metric]} vs Baseline\n{compare_family} - {baseline_family}",
-        fontsize=13,
+        "Method",
+        f"Δ{metric_labels[metric]}",
     )
+    set_method_xticklabels(ax, method_order)
 
     y_min, y_max = ax.get_ylim()
     y_span = y_max - y_min if y_max > y_min else 1.0
@@ -1714,13 +2605,12 @@ def plot_probe_paired_deltas(
             f"median={method_df['delta'].median():.3f}\nn={len(method_df)}",
             ha="center",
             va="bottom",
-            fontsize=9,
+            fontsize=PAPER_ANNOTATION_FONTSIZE,
         )
 
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.show()
-    print(f"Saved plot to: {out_path}")
+    fig.tight_layout()
+    _save_png_and_pdf(fig, Path(out_path))
+    plt.close(fig)
 
 
 def plot_probe_binned_density_trends(
@@ -1741,6 +2631,7 @@ def plot_probe_binned_density_trends(
     if metric not in metric_labels:
         raise ValueError(f"Unsupported metric for binned density trend plot: {metric}")
 
+    combined_probe_df = original_label_rows(combined_probe_df)
     if include_methods is None:
         include_methods = ["attention_weights", "integrated_gradients", "occlusion", "residue_head", "random_mean"]
     include_methods = [method for method in include_methods if method in set(combined_probe_df["method"])]
@@ -1773,7 +2664,7 @@ def plot_probe_binned_density_trends(
     family_linestyle, family_marker = get_family_styles(family_order)
     method_order = [method for method in include_methods if method in set(grouped["method"])]
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=PAPER_FIGSIZE)
     for family in family_order:
         for method in method_order:
             subset = grouped.loc[
@@ -1794,9 +2685,12 @@ def plot_probe_binned_density_trends(
                 alpha=0.9,
             )
 
-    ax.set_title(f"Binned {metric_labels[metric]} vs. Epitope Density", fontsize=13)
-    ax.set_xlabel("Epitope Density (quantile-bin midpoint)", fontsize=12)
-    ax.set_ylabel(metric_labels[metric], fontsize=12)
+    apply_paper_axis_style(
+        ax,
+        f"Binned {metric_labels[metric]} vs. Epitope Density",
+        "Epitope Density (quantile-bin midpoint)",
+        metric_labels[metric],
+    )
 
     method_handles = [
         Line2D([0], [0], color=PALETTE[method], linewidth=2.5, label=METHOD_XLABELS.get(method, method).replace("\n", " "))
@@ -1823,24 +2717,21 @@ def plot_probe_binned_density_trends(
     method_legend = ax.legend(
         handles=method_handles,
         title="Method / Color",
-        fontsize=8,
-        title_fontsize=9,
         loc="upper left",
         bbox_to_anchor=(0.01, 0.99),
     )
+    style_legend(ax, title="Method / Color")
     ax.add_artist(method_legend)
     ax.legend(
         handles=family_handles,
         title="Model family / Line + marker",
-        fontsize=8,
-        title_fontsize=9,
         loc="upper left",
         bbox_to_anchor=(0.40, 0.99),
     )
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.show()
-    print(f"Saved plot to: {out_path}")
+    style_legend(ax, title="Model family / Line + marker")
+    fig.tight_layout()
+    _save_png_and_pdf(fig, Path(out_path))
+    plt.close(fig)
 
 
 def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: Path, auprc_out_path: Path) -> None:
@@ -1848,6 +2739,7 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
     from matplotlib.lines import Line2D
     from statsmodels.nonparametric.smoothers_lowess import lowess
 
+    combined_probe_df = original_label_rows(combined_probe_df)
     scatter_methods = ["attention_weights", "integrated_gradients", "occlusion", "random_mean", "residue_head"]
     scatter_df = combined_probe_df[combined_probe_df["method"].isin(scatter_methods)].copy()
     family_order = get_family_order(scatter_df)
@@ -1857,7 +2749,7 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
         ("auroc", "AUROC", auroc_out_path),
         ("auprc", "AUPRC", auprc_out_path),
     ]:
-        fig, ax = plt.subplots(figsize=(9, 6))
+        fig, ax = plt.subplots(figsize=PAPER_FIGSIZE)
 
         for method in scatter_methods:
             for family in family_order:
@@ -1892,9 +2784,12 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
                         linestyle=family_linestyle[family],
                     )
 
-        ax.set_xlabel("Epitope Density (fraction of residues)", fontsize=12)
-        ax.set_ylabel(metric_label, fontsize=12)
-        ax.set_title(f"{metric_label} vs. Epitope Density", fontsize=13)
+        apply_paper_axis_style(
+            ax,
+            f"{metric_label} vs. Epitope Density",
+            "Epitope Density (fraction of residues)",
+            metric_label,
+        )
 
         method_handles = [
             Line2D([0], [0], color=PALETTE[method], linewidth=2.5, label=METHOD_XLABELS[method].replace("\n", " "))
@@ -1921,21 +2816,18 @@ def plot_probe_density_trends(combined_probe_df: pd.DataFrame, auroc_out_path: P
         method_legend = ax.legend(
             handles=method_handles,
             title="Method / Color",
-            fontsize=8,
-            title_fontsize=9,
             loc="upper left",
             bbox_to_anchor=(0.01, 0.99),
         )
+        style_legend(ax, title="Method / Color")
         ax.add_artist(method_legend)
         ax.legend(
             handles=family_handles,
             title="Model / Style\n(line + marker)",
-            fontsize=8,
-            title_fontsize=9,
             loc="upper left",
             bbox_to_anchor=(0.42, 0.99),
         )
-        plt.tight_layout()
-        plt.savefig(out_path, dpi=150, bbox_inches="tight")
-        plt.show()
-        print(f"Saved plot to: {out_path}")
+        style_legend(ax, title="Model / Style\n(line + marker)")
+        fig.tight_layout()
+        _save_png_and_pdf(fig, Path(out_path))
+        plt.close(fig)

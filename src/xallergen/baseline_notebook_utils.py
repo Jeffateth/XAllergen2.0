@@ -573,6 +573,92 @@ def compute_integrated_gradients(
     return normalize_scores(importance) if normalize else importance
 
 
+def compute_gradient_x_input_scores(
+    model,
+    tokenizer,
+    sequence: str,
+    device: str,
+) -> np.ndarray:
+    """
+    Gradient x Input attribution against the protein-level classification logit.
+    Returns one absolute embedding-dot-gradient score per residue.
+    """
+    model.eval()
+    encodings = tokenize_sequence(tokenizer, sequence, device)
+    attention_mask = encodings["attention_mask"]
+
+    model.zero_grad(set_to_none=True)
+    input_embeds = model.backbone.get_input_embeddings()(encodings["input_ids"]).detach()
+    input_embeds.requires_grad_(True)
+
+    logits = model.forward_from_inputs_embeds(input_embeds, attention_mask)["logits"]
+    gradients = torch.autograd.grad(
+        outputs=logits.sum(),
+        inputs=input_embeds,
+        retain_graph=False,
+        create_graph=False,
+        only_inputs=True,
+    )[0]
+
+    scores = (input_embeds * gradients).sum(dim=-1).abs().squeeze(0)
+    valid_length = int(attention_mask.sum().item())
+    scores = scores[:valid_length].detach().cpu().numpy().astype(np.float32)
+    model.zero_grad(set_to_none=True)
+    return scores
+
+
+def compute_smoothgrad_ig_scores(
+    model,
+    tokenizer,
+    sequence: str,
+    device: str,
+    steps: int,
+    n_samples: int = 10,
+    noise_std: float = 0.05,
+    internal_batch_size: int = 10,
+) -> np.ndarray:
+    """
+    SmoothGrad over Integrated Gradients in embedding space.
+    Noise is added to ESM input embeddings; tokens and labels are unchanged.
+    """
+    from captum.attr import IntegratedGradients
+
+    if n_samples <= 0:
+        raise ValueError("n_samples must be positive for SmoothGrad-IG.")
+    if noise_std < 0:
+        raise ValueError("noise_std must be non-negative for SmoothGrad-IG.")
+
+    model.eval()
+    encodings = tokenize_sequence(tokenizer, sequence, device)
+    attention_mask = encodings["attention_mask"]
+    base_embeds = model.backbone.get_input_embeddings()(encodings["input_ids"]).detach()
+    baseline = torch.zeros_like(base_embeds)
+    noise_scale = float(noise_std) * float(base_embeds.detach().std().item())
+    total_scores = np.zeros(int(attention_mask.sum().item()), dtype=np.float64)
+
+    def ig_forward(inputs_embeds: torch.Tensor) -> torch.Tensor:
+        return model.forward_from_inputs_embeds(inputs_embeds, attention_mask)["logits"]
+
+    ig = IntegratedGradients(ig_forward)
+    for _ in range(n_samples):
+        model.zero_grad(set_to_none=True)
+        if noise_scale > 0:
+            noisy_embeds = base_embeds + torch.randn_like(base_embeds) * noise_scale
+        else:
+            noisy_embeds = base_embeds
+        attributions = ig.attribute(
+            inputs=noisy_embeds.detach(),
+            baselines=baseline,
+            n_steps=steps,
+            internal_batch_size=internal_batch_size,
+        )
+        scores = attributions.abs().sum(dim=-1).squeeze(0).detach().cpu().numpy()
+        total_scores += scores[: total_scores.shape[0]]
+
+    model.zero_grad(set_to_none=True)
+    return (total_scores / n_samples).astype(np.float32)
+
+
 def serialize_score_array(scores: np.ndarray) -> str:
     array = np.asarray(scores, dtype=np.float32)
     return json.dumps(array.tolist(), separators=(",", ":"))
