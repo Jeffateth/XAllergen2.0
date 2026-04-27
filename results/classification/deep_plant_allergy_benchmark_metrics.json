@@ -1,0 +1,21 @@
+{
+  "model_name": "deep_plant_allergy_benchmark",
+  "benchmark_type": "published_architecture_retrained_on_xallergen",
+  "embedding_model": "facebook/esm1b_t33_650M_UR50S",
+  "seed": 42,
+  "best_epoch": 43,
+  "checkpoint_path": "/content/drive/MyDrive/XAllergen2.0/models/deep_plant_allergy_benchmark.pt",
+  "Split": "Test",
+  "Loss": 0.18637992039151574,
+  "Accuracy": 0.9389978213507625,
+  "F1 Score": 0.9390042578635475,
+  "MCC": 0.8780188436764838,
+  "Precision": 0.9390740897028347,
+  "Recall": 0.9389978213507625,
+  "ROC-AUC": 0.9742401215805472,
+  "TP": 634,
+  "TN": 659,
+  "FP": 46,
+  "FN": 38,
+  "Inference Time (s)": 10.631754875183105
+}
