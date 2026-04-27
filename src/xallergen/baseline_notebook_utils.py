@@ -719,7 +719,13 @@ def run_baseline_probe_suite(
     ig_steps: int = IG_STEPS,
     n_random_draws: int = 100,
     max_seq_len: int = MAX_SEQ_LEN,
+    ig_internal_batch_size: int | None = 1,
+    smoothgrad_ig_samples: int = 10,
+    smoothgrad_ig_noise_std: float = 0.05,
+    include_shuffled_mean: bool = False,
 ) -> pd.DataFrame:
+    from .mtl_epitope_notebook_utils import compute_occlusion_scores_mtl
+
     rng = np.random.default_rng(RANDOM_STATE)
     results_rows = []
 
@@ -757,6 +763,7 @@ def run_baseline_probe_suite(
                 device,
                 steps=ig_steps,
                 normalize=False,
+                internal_batch_size=ig_internal_batch_size,
             )
             results_rows.append(
                 {
@@ -768,6 +775,61 @@ def run_baseline_probe_suite(
             )
         except Exception as exc:
             print(f"[IG] {accession}: {exc}")
+
+        try:
+            gradient_x_input_scores = compute_gradient_x_input_scores(
+                model,
+                tokenizer,
+                sequence,
+                device,
+            )
+            results_rows.append(
+                {
+                    **base,
+                    "method": "gradient_x_input",
+                    "gradient_x_input_scores_json": serialize_score_array(gradient_x_input_scores),
+                    **compute_probe_metrics(epitope_labels, gradient_x_input_scores),
+                }
+            )
+        except Exception as exc:
+            print(f"[Grad x Input] {accession}: {exc}")
+
+        try:
+            smoothgrad_ig_scores = compute_smoothgrad_ig_scores(
+                model,
+                tokenizer,
+                sequence,
+                device,
+                steps=ig_steps,
+                n_samples=smoothgrad_ig_samples,
+                noise_std=smoothgrad_ig_noise_std,
+                internal_batch_size=ig_internal_batch_size if ig_internal_batch_size is not None else 1,
+            )
+            results_rows.append(
+                {
+                    **base,
+                    "method": "smoothgrad_ig",
+                    "smoothgrad_ig_scores_json": serialize_score_array(smoothgrad_ig_scores),
+                    **compute_probe_metrics(epitope_labels, smoothgrad_ig_scores),
+                }
+            )
+        except Exception as exc:
+            print(f"[SmoothGrad-IG] {accession}: {exc}")
+
+        try:
+            occlusion_scores = normalize_scores(
+                compute_occlusion_scores_mtl(model, tokenizer, sequence, device)
+            )
+            results_rows.append(
+                {
+                    **base,
+                    "method": "occlusion",
+                    "occlusion_scores_json": serialize_score_array(occlusion_scores),
+                    **compute_probe_metrics(epitope_labels, occlusion_scores),
+                }
+            )
+        except Exception as exc:
+            print(f"[Occlusion] {accession}: {exc}")
 
         rand_metrics = [
             compute_probe_metrics(epitope_labels, rng.uniform(0.0, 1.0, size=seq_len))
@@ -781,7 +843,7 @@ def run_baseline_probe_suite(
             }
         )
 
-        if attn_scores is not None:
+        if include_shuffled_mean and attn_scores is not None:
             try:
                 shuffled_metrics = [
                     compute_probe_metrics(rng.permutation(epitope_labels), attn_scores)

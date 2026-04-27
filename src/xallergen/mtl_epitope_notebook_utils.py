@@ -1794,11 +1794,250 @@ def save_localization_summary_csvs(
     }
 
 
+def get_retired_checkpoint_names() -> tuple[str, ...]:
+    return (
+        "baseline_top1_unfrozen_esm2.pt",
+        "baseline_top1_unfrozen_from_frozen_esm2.pt",
+    )
+
+
+def get_supported_probe_model_registry(
+    models_dir: Path,
+    results_dir: Path,
+    include_supplementary: bool = True,
+) -> list[dict[str, Any]]:
+    registry = [
+        {
+            "family_key": "baseline",
+            "display_label": "Frozen ESM-2",
+            "checkpoint_name": "baseline_frozen_esm2.pt",
+            "model_kind": "baseline",
+            "probe_rows_path": probe_rows_dir(results_dir) / "baseline_probing_rows.csv",
+            "summary_path": probe_summaries_dir(results_dir) / "baseline_probing_summary.csv",
+            "supported_methods": (
+                "attention_weights",
+                "integrated_gradients",
+                "gradient_x_input",
+                "smoothgrad_ig",
+                "occlusion",
+                "random_mean",
+            ),
+            "metrics_candidates": (
+                Path(results_dir) / "baseline_metrics.json",
+                classification_results_dir(results_dir) / "baseline_metrics.json",
+            ),
+            "supplementary_only": False,
+        },
+        {
+            "family_key": "mtl_frozen",
+            "display_label": "MTL ESM-2",
+            "checkpoint_name": "mtl_frozen_esm2_epitope.pt",
+            "model_kind": "mtl",
+            "probe_rows_path": probe_rows_dir(results_dir) / "mtl_probing_rows.csv",
+            "summary_path": probe_summaries_dir(results_dir) / "mtl_probing_summary.csv",
+            "supported_methods": (
+                "residue_head",
+                "attention_weights",
+                "integrated_gradients",
+                "gradient_x_input",
+                "smoothgrad_ig",
+                "occlusion",
+                "random_mean",
+            ),
+            "metrics_candidates": (
+                Path(results_dir) / "mtl_metrics.json",
+                classification_results_dir(results_dir) / "mtl_baseline_metrics.json",
+            ),
+            "supplementary_only": False,
+        },
+        {
+            "family_key": "deep_plant_benchmark",
+            "display_label": "DeepPlantAllergy",
+            "checkpoint_name": "deep_plant_allergy_benchmark.pt",
+            "model_kind": "deep_plant",
+            "probe_rows_path": probe_rows_dir(results_dir) / "deep_plant_allergy_benchmark_probing_rows.csv",
+            "summary_path": probe_summaries_dir(results_dir) / "deep_plant_allergy_benchmark_probing_summary.csv",
+            "supported_methods": (
+                "attention_weights",
+                "integrated_gradients",
+                "random_mean",
+            ),
+            "metrics_candidates": (
+                Path(results_dir) / "deep_plant_allergy_benchmark_metrics.json",
+                classification_results_dir(results_dir) / "deep_plant_allergy_benchmark_metrics.json",
+            ),
+            "supplementary_only": False,
+        },
+    ]
+    if include_supplementary:
+        registry.append(
+            {
+                "family_key": "mtl_top1_unfrozen",
+                "display_label": "MTL ESM-2 top-1",
+                "checkpoint_name": "mtl_top1_unfrozen_esm2_epitope.pt",
+                "model_kind": "mtl",
+                "probe_rows_path": probe_rows_dir(results_dir) / "mtl_top1_unfrozen_probing_rows.csv",
+                "summary_path": probe_summaries_dir(results_dir) / "mtl_top1_unfrozen_probing_summary.csv",
+                "supported_methods": (
+                    "residue_head",
+                    "attention_weights",
+                    "integrated_gradients",
+                    "gradient_x_input",
+                    "smoothgrad_ig",
+                    "occlusion",
+                    "random_mean",
+                ),
+                "metrics_candidates": (
+                    Path(results_dir) / "mtl_top1_unfrozen_baseline_metrics.json",
+                    classification_results_dir(results_dir) / "mtl_top1_unfrozen_baseline_metrics.json",
+                ),
+                "supplementary_only": True,
+            }
+        )
+
+    materialized = []
+    for spec in registry:
+        checkpoint_path = Path(models_dir) / spec["checkpoint_name"]
+        materialized.append(
+            {
+                **spec,
+                "checkpoint_path": checkpoint_path,
+                "checkpoint_exists": checkpoint_path.exists(),
+                "probe_rows_exists": Path(spec["probe_rows_path"]).exists(),
+                "summary_exists": Path(spec["summary_path"]).exists(),
+            }
+        )
+    return materialized
+
+
+def discover_supported_probe_row_artifacts(
+    models_dir: Path,
+    results_dir: Path,
+    include_supplementary: bool = True,
+) -> pd.DataFrame:
+    registry = get_supported_probe_model_registry(
+        models_dir=models_dir,
+        results_dir=results_dir,
+        include_supplementary=include_supplementary,
+    )
+    records = []
+    for spec in registry:
+        records.append(
+            {
+                "family_key": spec["family_key"],
+                "display_label": spec["display_label"],
+                "checkpoint_name": spec["checkpoint_name"],
+                "checkpoint_path": spec["checkpoint_path"],
+                "checkpoint_exists": spec["checkpoint_exists"],
+                "probe_rows_path": spec["probe_rows_path"],
+                "probe_rows_exists": spec["probe_rows_exists"],
+                "summary_path": spec["summary_path"],
+                "summary_exists": spec["summary_exists"],
+                "supported_methods": list(spec["supported_methods"]),
+                "supplementary_only": spec["supplementary_only"],
+                "model_kind": spec["model_kind"],
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def load_supported_probe_rows(discovery_df: pd.DataFrame) -> pd.DataFrame:
+    available_df = discovery_df.loc[discovery_df["probe_rows_exists"]].copy()
+    if available_df.empty:
+        raise FileNotFoundError("No supported probe-row CSVs were found. Run notebook 06 first.")
+
+    frames = []
+    for row in available_df.itertuples(index=False):
+        header = pd.read_csv(row.probe_rows_path, nrows=0)
+        columns = [
+            "accession",
+            "seq_len",
+            "epitope_density",
+            "n_epitope_residues",
+            "model_family",
+            "method",
+            "label_variant",
+            "auroc",
+            "auprc",
+            "precision_at_k",
+            "ig_scores_json",
+            "gradient_x_input_scores_json",
+            "smoothgrad_ig_scores_json",
+            "occlusion_scores_json",
+        ]
+        usecols = [column for column in columns if column in header.columns]
+        frame = ensure_label_variant_column(pd.read_csv(row.probe_rows_path, usecols=usecols))
+        frame = frame.copy()
+        frame["model_family"] = row.display_label
+        frame["source_probe_rows_path"] = str(row.probe_rows_path)
+        frame["family_key"] = row.family_key
+        frames.append(frame)
+
+    combined_df = ensure_label_variant_column(pd.concat(frames, ignore_index=True))
+    validate_unique_probe_rows(combined_df)
+    return combined_df
+
+
+def load_protein_level_metrics(
+    results_dir: Path,
+    models_dir: Path | None = None,
+    include_supplementary: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if models_dir is None:
+        models_dir = Path(results_dir).parent / "models"
+    registry = get_supported_probe_model_registry(
+        models_dir=models_dir,
+        results_dir=results_dir,
+        include_supplementary=include_supplementary,
+    )
+    metric_rows = []
+    diagnostic_rows = []
+
+    for spec in registry:
+        found_path = None
+        payload = None
+        for candidate in spec["metrics_candidates"]:
+            candidate = Path(candidate)
+            if candidate.exists():
+                with candidate.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                found_path = candidate
+                break
+        diagnostic_rows.append(
+            {
+                "family_key": spec["family_key"],
+                "display_label": spec["display_label"],
+                "metrics_found": found_path is not None,
+                "metrics_path": str(found_path) if found_path is not None else None,
+                "supplementary_only": spec["supplementary_only"],
+            }
+        )
+        if payload is None:
+            continue
+        test_metrics = payload.get("test_metrics", {})
+        metric_rows.append(
+            {
+                "family_key": spec["family_key"],
+                "Model": spec["display_label"],
+                "AUROC": test_metrics.get("auroc"),
+                "AUPRC": test_metrics.get("auprc"),
+                "MCC": test_metrics.get("mcc"),
+                "Accuracy": test_metrics.get("accuracy"),
+                "n_test_sequences": test_metrics.get("n_test_sequences"),
+                "metrics_path": str(found_path),
+            }
+        )
+
+    return pd.DataFrame(metric_rows), pd.DataFrame(diagnostic_rows)
+
+
 PROBE_FAMILY_LABEL_OVERRIDES = {
-    "baseline": "Baseline (03 frozen)",
-    "deep_plant_benchmark": "DeepPlant benchmark (03)",
-    "frozen": "MTL (04 frozen)",
-    "top1_unfrozen": "MTL (05 top1_unfrozen)",
+    "baseline": "Frozen ESM-2",
+    "deep_plant_benchmark": "DeepPlantAllergy",
+    "mtl_frozen": "MTL ESM-2",
+    "mtl_top1_unfrozen": "MTL ESM-2 top-1",
+    "frozen": "MTL ESM-2",
+    "top1_unfrozen": "MTL ESM-2 top-1",
 }
 
 
@@ -1808,11 +2047,12 @@ def infer_probe_variant_from_checkpoint_name(checkpoint_name: str) -> tuple[str 
     if checkpoint_name == "deep_plant_allergy_benchmark.pt":
         return "deep_plant_benchmark", PROBE_FAMILY_LABEL_OVERRIDES["deep_plant_benchmark"]
     if checkpoint_name == "mtl_frozen_esm2_epitope.pt":
-        return "frozen", PROBE_FAMILY_LABEL_OVERRIDES["frozen"]
+        return "mtl_frozen", PROBE_FAMILY_LABEL_OVERRIDES["mtl_frozen"]
     if checkpoint_name.startswith("mtl_") and checkpoint_name.endswith("_esm2_epitope.pt"):
         variant = checkpoint_name[len("mtl_") : -len("_esm2_epitope.pt")]
         if variant:
-            return variant, PROBE_FAMILY_LABEL_OVERRIDES.get(variant, f"MTL ({variant})")
+            family_key = f"mtl_{variant}"
+            return family_key, PROBE_FAMILY_LABEL_OVERRIDES.get(family_key, f"MTL ({variant})")
     return None, None
 
 
@@ -1822,9 +2062,12 @@ def probe_rows_path_for_variant(results_dir: Path, variant: str) -> Path:
         return rows_dir / "baseline_probing_rows.csv"
     if variant == "deep_plant_benchmark":
         return rows_dir / "deep_plant_allergy_benchmark_probing_rows.csv"
-    if variant == "frozen":
+    if variant in {"frozen", "mtl_frozen"}:
         return rows_dir / "mtl_probing_rows.csv"
-    return rows_dir / f"mtl_{variant}_probing_rows.csv"
+    if variant in {"top1_unfrozen", "mtl_top1_unfrozen"}:
+        return rows_dir / "mtl_top1_unfrozen_probing_rows.csv"
+    suffix = variant[len("mtl_") :] if variant.startswith("mtl_") else variant
+    return rows_dir / f"mtl_{suffix}_probing_rows.csv"
 
 
 def legacy_probe_rows_path_for_variant(results_dir: Path, variant: str) -> Path:
@@ -1832,36 +2075,43 @@ def legacy_probe_rows_path_for_variant(results_dir: Path, variant: str) -> Path:
         return Path(results_dir) / "baseline_probing_rows.csv"
     if variant == "deep_plant_benchmark":
         return Path(results_dir) / "deep_plant_allergy_benchmark_probing_rows.csv"
-    if variant == "frozen":
+    if variant in {"frozen", "mtl_frozen"}:
         return Path(results_dir) / "mtl_probing_rows.csv"
-    return Path(results_dir) / f"mtl_{variant}_probing_rows.csv"
+    if variant in {"top1_unfrozen", "mtl_top1_unfrozen"}:
+        return Path(results_dir) / "mtl_top1_unfrozen_probing_rows.csv"
+    suffix = variant[len("mtl_") :] if variant.startswith("mtl_") else variant
+    return Path(results_dir) / f"mtl_{suffix}_probing_rows.csv"
 
 
 def discover_probe_row_artifacts(models_dir: Path, results_dir: Path) -> pd.DataFrame:
-    records = []
-    for checkpoint_path in sorted(models_dir.glob("*.pt")):
-        variant, default_label = infer_probe_variant_from_checkpoint_name(checkpoint_path.name)
-        if variant is None:
-            continue
-        probe_rows_path = probe_rows_path_for_variant(results_dir, variant)
-        if not probe_rows_path.exists():
-            legacy_path = legacy_probe_rows_path_for_variant(results_dir, variant)
-            if legacy_path.exists():
-                probe_rows_path = legacy_path
-        records.append(
-            {
-                "checkpoint_name": checkpoint_path.name,
-                "variant": variant,
-                "model_family": default_label,
-                "checkpoint_path": checkpoint_path,
-                "probe_rows_path": probe_rows_path,
-                "probe_rows_exists": probe_rows_path.exists(),
-            }
-        )
-    return pd.DataFrame(records)
+    discovery_df = discover_supported_probe_row_artifacts(
+        models_dir=models_dir,
+        results_dir=results_dir,
+        include_supplementary=True,
+    )
+    if discovery_df.empty:
+        return discovery_df
+    return discovery_df.rename(
+        columns={
+            "family_key": "variant",
+            "display_label": "model_family",
+        }
+    )[
+        [
+            "checkpoint_name",
+            "variant",
+            "model_family",
+            "checkpoint_path",
+            "probe_rows_path",
+            "probe_rows_exists",
+        ]
+    ]
 
 
 def load_available_probe_rows(discovery_df: pd.DataFrame) -> pd.DataFrame:
+    if "family_key" in discovery_df.columns and "display_label" in discovery_df.columns:
+        return load_supported_probe_rows(discovery_df)
+
     available_df = discovery_df.loc[discovery_df["probe_rows_exists"]].copy()
     if available_df.empty:
         raise FileNotFoundError("No matching probe-row CSVs were found. Generate probe artifacts first.")
@@ -2039,21 +2289,29 @@ PALETTE = {
 }
 METHOD_XLABELS = {
     "random_mean": "Random",
-    "integrated_gradients": "Integrated\nGradients",
-    "gradient_x_input": "Gradient ×\nInput",
+    "integrated_gradients": "IG",
+    "gradient_x_input": "Grad×Input",
     "smoothgrad_ig": "SmoothGrad-\nIG",
     "occlusion": "Occlusion",
-    "attention_weights": "Attention\nPooling",
-    "residue_head": "MTL\nResidue Head",
+    "attention_weights": "Attention",
+    "residue_head": "Residue head",
 }
 DEFAULT_FAMILY_ORDER = [
+    "Frozen ESM-2",
+    "MTL ESM-2",
+    "DeepPlantAllergy",
+    "MTL ESM-2 top-1",
     "Baseline (03 frozen)",
-    "DeepPlant benchmark (03)",
     "MTL (04)",
     "MTL (04 frozen)",
+    "DeepPlant benchmark (03)",
     "MTL (05 top1_unfrozen)",
 ]
 DEFAULT_FAMILY_LINESTYLE = {
+    "Frozen ESM-2": "--",
+    "MTL ESM-2": "-",
+    "DeepPlantAllergy": ":",
+    "MTL ESM-2 top-1": (0, (5, 2)),
     "Baseline (03 frozen)": "--",
     "DeepPlant benchmark (03)": ":",
     "MTL (04)": "-",
@@ -2061,6 +2319,10 @@ DEFAULT_FAMILY_LINESTYLE = {
     "MTL (05 top1_unfrozen)": (0, (5, 2)),
 }
 DEFAULT_FAMILY_MARKER = {
+    "Frozen ESM-2": "o",
+    "MTL ESM-2": "^",
+    "DeepPlantAllergy": "D",
+    "MTL ESM-2 top-1": "P",
     "Baseline (03 frozen)": "o",
     "DeepPlant benchmark (03)": "D",
     "MTL (04)": "^",
