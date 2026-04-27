@@ -38,14 +38,15 @@ Run notebooks in order to reproduce the full pipeline:
 
 1. `notebooks/01_curate_allergenicity_data.ipynb`
 2. `notebooks/02_data_exploration_deepalgpro.ipynb`
-3. `notebooks/03_baseline_model_colab.ipynb`
-4. `notebooks/03_baseline_top1_unfrozen_esm2.ipynb`
-5. `notebooks/03_deep_plant_allergy_benchmark.ipynb`
-6. `notebooks/04_mtl_epitope_supervision.ipynb`
-7. `notebooks/05_mtl_top1_unfrozen_epitope_supervision.ipynb`
-8. `notebooks/06_generate_probe_rows.ipynb`
-9. `notebooks/07_compare_all_model_probes.ipynb`
-10. `notebooks/08_insilico_mutagenesis.ipynb`
+3. `notebooks/03_baseline_model_esm2.ipynb`
+4. `notebooks/03_deep_plant_allergy_benchmark.ipynb`
+5. `notebooks/04_mtl_epitope_supervision.ipynb`
+6. `notebooks/05_mtl_top1_unfrozen_epitope_supervision.ipynb`
+7. `notebooks/06_generate_probe_rows.ipynb`
+8. `notebooks/07_compare_all_model_probes.ipynb`
+9. `notebooks/08_insilico_mutagenesis.ipynb`
+
+The retired baseline-top1-unfrozen baseline notebook is kept only for archival reference at `notebooks/Legacy scripts/03_baseline_top1_unfrozen_esm2.ipynb` and is not part of the current analysis workflow.
 
 To regenerate figures without rerunning training or probing:
 
