@@ -1,6 +1,6 @@
-# Predictively Sufficient, Immunologically Blind
+# Predictively Strong, Immunologically Blind
 
-Code for the paper *Predictively Sufficient, Immunologically Blind: Benchmarking Faithfulness in Protein Allergenicity Models*.
+Code for the paper *Predictively Strong, Immunologically Blind: Benchmarking Faithfulness in Protein Allergenicity Models*.
 
 ## Repository Layout
 
@@ -39,11 +39,13 @@ Run notebooks in order to reproduce the full pipeline:
 1. `notebooks/01_curate_allergenicity_data.ipynb`
 2. `notebooks/02_data_exploration_deepalgpro.ipynb`
 3. `notebooks/03_baseline_model_colab.ipynb`
-4. `notebooks/05_mtl_epitope_supervision.ipynb`
-5. `notebooks/06_mtl_top1_unfrozen_epitope_supervision.ipynb`
-6. `notebooks/07_generate_probe_rows.ipynb`
-7. `notebooks/08_compare_all_model_probes.ipynb`
-8. `notebooks/09_insilico_mutagenesis.ipynb`
+4. `notebooks/03_baseline_top1_unfrozen_esm2.ipynb`
+5. `notebooks/03_deep_plant_allergy_benchmark.ipynb`
+6. `notebooks/04_mtl_epitope_supervision.ipynb`
+7. `notebooks/05_mtl_top1_unfrozen_epitope_supervision.ipynb`
+8. `notebooks/06_generate_probe_rows.ipynb`
+9. `notebooks/07_compare_all_model_probes.ipynb`
+10. `notebooks/08_insilico_mutagenesis.ipynb`
 
 To regenerate figures without rerunning training or probing:
 

@@ -7,7 +7,7 @@ The environment is intentionally scoped to the active local workflow:
 - `01_curate_allergenicity_data.ipynb`
 - `02_data_exploration_deepalgpro.ipynb`
 - `03_baseline_model_colab.ipynb`
-- `04_probing_metrics.ipynb`
+- `06_generate_probe_rows.ipynb`
 - `baseline_notebook_utils.py`
 
 ## Prerequisites

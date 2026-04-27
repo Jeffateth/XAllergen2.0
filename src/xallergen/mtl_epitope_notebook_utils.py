@@ -69,8 +69,8 @@ class MTLOutputPaths:
     combined_auroc_density_png: Path
     combined_auprc_density_png: Path
     baseline_summary_csv: Path
-    mtl_family_label: str = "MTL (05)"
-    baseline_family_label: str = "Baseline (04)"
+    mtl_family_label: str = "MTL (04)"
+    baseline_family_label: str = "Baseline (03 frozen)"
 
 
 @dataclass(frozen=True)
@@ -1795,15 +1795,21 @@ def save_localization_summary_csvs(
 
 
 PROBE_FAMILY_LABEL_OVERRIDES = {
-    "baseline": "Baseline (04)",
-    "frozen": "MTL (05 frozen)",
-    "top1_unfrozen": "MTL (06 top1_unfrozen)",
+    "baseline": "Baseline (03 frozen)",
+    "baseline_top1_unfrozen": "Baseline (03 top1_unfrozen)",
+    "deep_plant_benchmark": "DeepPlant benchmark (03)",
+    "frozen": "MTL (04 frozen)",
+    "top1_unfrozen": "MTL (05 top1_unfrozen)",
 }
 
 
 def infer_probe_variant_from_checkpoint_name(checkpoint_name: str) -> tuple[str | None, str | None]:
     if checkpoint_name == "baseline_frozen_esm2.pt":
         return "baseline", PROBE_FAMILY_LABEL_OVERRIDES["baseline"]
+    if checkpoint_name == "baseline_top1_unfrozen_esm2.pt":
+        return "baseline_top1_unfrozen", PROBE_FAMILY_LABEL_OVERRIDES["baseline_top1_unfrozen"]
+    if checkpoint_name == "deep_plant_allergy_benchmark.pt":
+        return "deep_plant_benchmark", PROBE_FAMILY_LABEL_OVERRIDES["deep_plant_benchmark"]
     if checkpoint_name == "mtl_frozen_esm2_epitope.pt":
         return "frozen", PROBE_FAMILY_LABEL_OVERRIDES["frozen"]
     if checkpoint_name.startswith("mtl_") and checkpoint_name.endswith("_esm2_epitope.pt"):
@@ -1817,6 +1823,10 @@ def probe_rows_path_for_variant(results_dir: Path, variant: str) -> Path:
     rows_dir = probe_rows_dir(results_dir)
     if variant == "baseline":
         return rows_dir / "baseline_probing_rows.csv"
+    if variant == "baseline_top1_unfrozen":
+        return rows_dir / "baseline_top1_unfrozen_probing_rows.csv"
+    if variant == "deep_plant_benchmark":
+        return rows_dir / "deep_plant_allergy_benchmark_probing_rows.csv"
     if variant == "frozen":
         return rows_dir / "mtl_probing_rows.csv"
     return rows_dir / f"mtl_{variant}_probing_rows.csv"
@@ -1825,6 +1835,10 @@ def probe_rows_path_for_variant(results_dir: Path, variant: str) -> Path:
 def legacy_probe_rows_path_for_variant(results_dir: Path, variant: str) -> Path:
     if variant == "baseline":
         return Path(results_dir) / "baseline_probing_rows.csv"
+    if variant == "baseline_top1_unfrozen":
+        return Path(results_dir) / "baseline_top1_unfrozen_probing_rows.csv"
+    if variant == "deep_plant_benchmark":
+        return Path(results_dir) / "deep_plant_allergy_benchmark_probing_rows.csv"
     if variant == "frozen":
         return Path(results_dir) / "mtl_probing_rows.csv"
     return Path(results_dir) / f"mtl_{variant}_probing_rows.csv"
@@ -2039,18 +2053,29 @@ METHOD_XLABELS = {
     "attention_weights": "Attention\nPooling",
     "residue_head": "MTL\nResidue Head",
 }
-DEFAULT_FAMILY_ORDER = ["Baseline (04)", "MTL (05)", "MTL (05 frozen)", "MTL (06 top1_unfrozen)"]
+DEFAULT_FAMILY_ORDER = [
+    "Baseline (03 frozen)",
+    "Baseline (03 top1_unfrozen)",
+    "DeepPlant benchmark (03)",
+    "MTL (04)",
+    "MTL (04 frozen)",
+    "MTL (05 top1_unfrozen)",
+]
 DEFAULT_FAMILY_LINESTYLE = {
-    "Baseline (04)": "--",
-    "MTL (05)": "-",
-    "MTL (05 frozen)": "-",
-    "MTL (06 top1_unfrozen)": "-.",
+    "Baseline (03 frozen)": "--",
+    "Baseline (03 top1_unfrozen)": "-.",
+    "DeepPlant benchmark (03)": ":",
+    "MTL (04)": "-",
+    "MTL (04 frozen)": "-",
+    "MTL (05 top1_unfrozen)": (0, (5, 2)),
 }
 DEFAULT_FAMILY_MARKER = {
-    "Baseline (04)": "o",
-    "MTL (05)": "^",
-    "MTL (05 frozen)": "^",
-    "MTL (06 top1_unfrozen)": "s",
+    "Baseline (03 frozen)": "o",
+    "Baseline (03 top1_unfrozen)": "s",
+    "DeepPlant benchmark (03)": "D",
+    "MTL (04)": "^",
+    "MTL (04 frozen)": "^",
+    "MTL (05 top1_unfrozen)": "P",
 }
 PAPER_FIGSIZE = (12, 8)
 PAPER_WIDE_FIGSIZE = (15, 8.5)
@@ -2467,7 +2492,7 @@ def plot_probe_paired_deltas(
     combined_probe_df: pd.DataFrame,
     out_path: Path,
     metric: str = "auprc",
-    baseline_family: str = "Baseline (04)",
+    baseline_family: str = "Baseline (03 frozen)",
     compare_family: str | None = None,
 ) -> None:
     import matplotlib.pyplot as plt

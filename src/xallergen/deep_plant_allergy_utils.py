@@ -5,15 +5,23 @@ import random
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch import nn
+from tqdm.auto import tqdm
+
+from .baseline_notebook_utils import (
+    compute_probe_metrics,
+    prepare_baseline_probe_frame,
+    serialize_score_array,
+)
 
 
 RANDOM_STATE = 42
-ESM_MODEL_NAME = "esm2_t6_8M_UR50D"
+ESM_MODEL_NAME = "esm1b_t33_650M_UR50S"
 HF_MODEL_NAME = f"facebook/{ESM_MODEL_NAME}"
-EMBEDDING_DIM = 320
+EMBEDDING_DIM = 1280
 HIDDEN_DIM = 128
 OUTPUT_DIM = 1
 NUM_LSTM_LAYERS = 3
@@ -221,30 +229,48 @@ def load_deep_plant_allergy_checkpoint(
     checkpoint_path: Path,
     device: str,
 ) -> tuple[EnhancedProteinModelFull, dict]:
-    state_dict = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if not isinstance(checkpoint, dict):
+        raise TypeError(f"Expected checkpoint dict, got {type(checkpoint)!r}")
+
+    metadata = checkpoint.get("metadata", {}) if "state_dict" in checkpoint else {}
+    state_dict = checkpoint.get("state_dict", checkpoint)
     if not isinstance(state_dict, dict):
         raise TypeError(f"Expected checkpoint state_dict dict, got {type(state_dict)!r}")
 
-    model = EnhancedProteinModelFull().to(device)
+    architecture = metadata.get("architecture_hyperparameters", {})
+    model = EnhancedProteinModelFull(
+        embedding_dim=int(architecture.get("embedding_dim", EMBEDDING_DIM)),
+        hidden_dim=int(architecture.get("hidden_dim", HIDDEN_DIM)),
+        output_dim=int(architecture.get("output_dim", OUTPUT_DIM)),
+        num_lstm_layers=int(architecture.get("num_lstm_layers", NUM_LSTM_LAYERS)),
+        num_fc_layers=int(architecture.get("num_fc_layers", NUM_FC_LAYERS)),
+        num_attention_heads=int(architecture.get("num_attention_heads", NUM_ATTENTION_HEADS)),
+        num_filters=int(architecture.get("num_filters", NUM_FILTERS)),
+        kernel_size=int(architecture.get("kernel_size", KERNEL_SIZE)),
+    ).to(device)
     model.load_state_dict(state_dict, strict=True)
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
 
-    metadata = {
+    resolved_metadata = {
         "architecture_hyperparameters": {
-            "embedding_dim": EMBEDDING_DIM,
-            "hidden_dim": HIDDEN_DIM,
-            "output_dim": OUTPUT_DIM,
-            "num_lstm_layers": NUM_LSTM_LAYERS,
-            "num_fc_layers": NUM_FC_LAYERS,
-            "num_attention_heads": NUM_ATTENTION_HEADS,
-            "num_filters": NUM_FILTERS,
-            "kernel_size": KERNEL_SIZE,
+            "embedding_dim": int(architecture.get("embedding_dim", EMBEDDING_DIM)),
+            "hidden_dim": int(architecture.get("hidden_dim", HIDDEN_DIM)),
+            "output_dim": int(architecture.get("output_dim", OUTPUT_DIM)),
+            "num_lstm_layers": int(architecture.get("num_lstm_layers", NUM_LSTM_LAYERS)),
+            "num_fc_layers": int(architecture.get("num_fc_layers", NUM_FC_LAYERS)),
+            "num_attention_heads": int(architecture.get("num_attention_heads", NUM_ATTENTION_HEADS)),
+            "num_filters": int(architecture.get("num_filters", NUM_FILTERS)),
+            "kernel_size": int(architecture.get("kernel_size", KERNEL_SIZE)),
         },
-        "esm_model_name": ESM_MODEL_NAME,
+        "esm_model_name": metadata.get("esm_model_name", ESM_MODEL_NAME),
+        "hf_model_name": metadata.get("hf_model_name", HF_MODEL_NAME),
+        "embedding_source": metadata.get("embedding_source", "huggingface_transformers"),
+        "checkpoint_format": "metadata_wrapped" if "state_dict" in checkpoint else "raw_state_dict",
     }
-    return model, metadata
+    return model, resolved_metadata
 
 
 def clean_protein_sequence(sequence: str) -> str:
@@ -334,3 +360,94 @@ def mean_metric_dicts(metric_rows: list[dict]) -> dict:
         "auprc": float(np.mean([row["auprc"] for row in metric_rows])),
         "precision_at_k": float(np.mean([row["precision_at_k"] for row in metric_rows])),
     }
+
+
+def run_deep_plant_probe_suite(
+    model,
+    embedding_model,
+    tokenizer,
+    eval_df: pd.DataFrame,
+    device: str,
+    ig_steps: int = IG_STEPS,
+    n_random_draws: int = 100,
+    max_seq_len: int = MAX_SEQ_LEN,
+) -> pd.DataFrame:
+    rng = np.random.default_rng(RANDOM_STATE)
+    results_rows = []
+
+    for _, row in tqdm(eval_df.iterrows(), total=len(eval_df), desc="Evaluating proteins"):
+        sequence = row["sequence"]
+        epitope_labels = row["epitope_label"]
+        accession = row["accession"]
+        seq_len = row["seq_len"]
+
+        tok_len = tokenizer(sequence, add_special_tokens=False, return_tensors="pt")["input_ids"].shape[1]
+        if tok_len > max_seq_len:
+            continue
+
+        base = {
+            "accession": accession,
+            "seq_len": seq_len,
+            "epitope_density": row["epitope_density"],
+            "n_epitope_residues": row["n_epitope_residues"],
+        }
+
+        attn_scores = None
+        try:
+            attn_scores = compute_attention_weights(model, embedding_model, tokenizer, sequence, device)
+            results_rows.append(
+                {**base, "method": "attention_weights", **compute_probe_metrics(epitope_labels, attn_scores)}
+            )
+        except Exception as exc:
+            print(f"[attention] {accession}: {exc}")
+
+        try:
+            ig_scores = compute_integrated_gradients(
+                model,
+                embedding_model,
+                tokenizer,
+                sequence,
+                device,
+                steps=ig_steps,
+                normalize=False,
+            )
+            results_rows.append(
+                {
+                    **base,
+                    "method": "integrated_gradients",
+                    "ig_scores_json": serialize_score_array(ig_scores),
+                    **compute_probe_metrics(epitope_labels, ig_scores),
+                }
+            )
+        except Exception as exc:
+            print(f"[IG] {accession}: {exc}")
+
+        rand_metrics = [
+            compute_probe_metrics(epitope_labels, rng.uniform(0.0, 1.0, size=seq_len))
+            for _ in range(n_random_draws)
+        ]
+        results_rows.append(
+            {
+                **base,
+                "method": "random_mean",
+                **mean_metric_dicts(rand_metrics),
+            }
+        )
+
+        if attn_scores is not None:
+            try:
+                shuffled_metrics = [
+                    compute_probe_metrics(rng.permutation(epitope_labels), attn_scores)
+                    for _ in range(n_random_draws)
+                ]
+                results_rows.append(
+                    {
+                        **base,
+                        "method": "shuffled_mean",
+                        **mean_metric_dicts(shuffled_metrics),
+                    }
+                )
+            except Exception as exc:
+                print(f"[shuffled] {accession}: {exc}")
+
+    return pd.DataFrame(results_rows)
