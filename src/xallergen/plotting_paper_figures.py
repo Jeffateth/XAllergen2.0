@@ -172,6 +172,11 @@ def summarize_main_residue_alignment_subset(
         signal_specs.append(("integrated_gradients", "DeepPlantAllergy", "DeepPlantAllergy IG"))
     elif not deepplant_attention.empty:
         signal_specs.append(("attention_weights", "DeepPlantAllergy", "DeepPlantAllergy Attention"))
+    else:
+        raise ValueError(
+            "Notebook 07 requires a DeepPlantAllergy comparison in the main residue-alignment plot, "
+            "but no DeepPlantAllergy IG or attention probe rows were found."
+        )
 
     rows = []
     for method_key, family_label, signal_label in signal_specs:
