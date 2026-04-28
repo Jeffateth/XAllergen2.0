@@ -161,6 +161,121 @@ def _safe_savefig(fig, path: Path, **kwargs) -> None:
             tmp_path.unlink()
 
 
+def _legend_below(ax, *, ncol: int = 2, y_offset: float = -0.2) -> None:
+    ax.legend(
+        frameon=False,
+        fontsize=FONT_LEGEND,
+        loc="upper center",
+        bbox_to_anchor=(0.5, y_offset),
+        ncol=ncol,
+        borderaxespad=0.0,
+    )
+
+
+def _benjamini_hochberg(p_values: list[float]) -> list[float]:
+    if not p_values:
+        return []
+    order = np.argsort(np.asarray(p_values, dtype=float))
+    ranked = np.asarray(p_values, dtype=float)[order]
+    n_tests = len(ranked)
+    adjusted = np.empty(n_tests, dtype=float)
+    running_min = 1.0
+    for idx in range(n_tests - 1, -1, -1):
+        rank = idx + 1
+        candidate = ranked[idx] * n_tests / rank
+        running_min = min(running_min, candidate)
+        adjusted[idx] = running_min
+    q_values = np.empty(n_tests, dtype=float)
+    q_values[order] = np.clip(adjusted, 0.0, 1.0)
+    return q_values.tolist()
+
+
+def _significance_marker(q_value: float) -> str:
+    if pd.isna(q_value):
+        return "NA"
+    if q_value < 0.001:
+        return "***"
+    if q_value < 0.01:
+        return "**"
+    if q_value < 0.05:
+        return "*"
+    return "ns"
+
+
+def _format_q_value(q_value: float) -> str:
+    if pd.isna(q_value):
+        return "NA"
+    if q_value < 0.001:
+        return f"{q_value:.1e}"
+    return f"{q_value:.3f}"
+
+
+def _format_vs_random(mean_diff: float, q_value: float) -> str:
+    marker = _significance_marker(q_value)
+    if marker == "ns":
+        return f"ns (q={_format_q_value(q_value)})"
+    direction = "higher" if mean_diff > 0 else "lower"
+    return f"{direction} {marker} (q={_format_q_value(q_value)})"
+
+
+def _compute_main_alignment_significance(base_df: pd.DataFrame, signal_specs: list[tuple[str, str, str]]) -> pd.DataFrame:
+    from scipy.stats import wilcoxon
+
+    metric_keys = ["auroc", "auprc", "precision_at_k"]
+    test_rows: list[dict[str, float | str]] = []
+    for method_key, family_label, signal_label in signal_specs:
+        if method_key == "random_mean":
+            continue
+        subset = base_df[
+            (base_df["model_family"] == family_label)
+            & (base_df["method"] == method_key)
+        ][["accession", *metric_keys]].copy()
+        random_subset = base_df[
+            (base_df["model_family"] == family_label)
+            & (base_df["method"] == "random_mean")
+        ][["accession", *metric_keys]].copy()
+        paired_df = subset.merge(random_subset, on="accession", suffixes=("", "_random"))
+        if paired_df.empty:
+            continue
+        for metric_key in metric_keys:
+            diffs = paired_df[metric_key] - paired_df[f"{metric_key}_random"]
+            nonzero_diffs = diffs.loc[diffs != 0]
+            p_value = 1.0
+            if not nonzero_diffs.empty:
+                p_value = float(
+                    wilcoxon(
+                        paired_df[metric_key].to_numpy(dtype=float),
+                        paired_df[f"{metric_key}_random"].to_numpy(dtype=float),
+                        alternative="two-sided",
+                        zero_method="wilcox",
+                    ).pvalue
+                )
+            test_rows.append(
+                {
+                    "Signal": signal_label,
+                    "metric_key": metric_key,
+                    "mean_diff_vs_random": float(diffs.mean()),
+                    "p_value_vs_random": p_value,
+                }
+            )
+
+    significance_df = pd.DataFrame(test_rows)
+    if significance_df.empty:
+        return significance_df
+    significance_df["q_value_vs_random"] = _benjamini_hochberg(
+        significance_df["p_value_vs_random"].tolist()
+    )
+    significance_df["vs_random_summary"] = significance_df.apply(
+        lambda row: _format_vs_random(
+            float(row["mean_diff_vs_random"]),
+            float(row["q_value_vs_random"]),
+        ),
+        axis=1,
+    )
+    significance_df["vs_random_marker"] = significance_df["q_value_vs_random"].map(_significance_marker)
+    return significance_df
+
+
 def compute_residue_prevalence(frame: pd.DataFrame) -> float:
     base = original_label_rows(frame)
     if base.empty:
@@ -225,7 +340,18 @@ def summarize_main_residue_alignment_subset(
                 "precision_at_k_ci_high": precision_ci_high,
             }
         )
-    return pd.DataFrame(rows), prevalence
+    summary_df = pd.DataFrame(rows)
+    significance_df = _compute_main_alignment_significance(base_df, signal_specs)
+    if significance_df.empty:
+        return summary_df, prevalence
+    pivot_source = significance_df[
+        ["Signal", "metric_key", "mean_diff_vs_random", "p_value_vs_random", "q_value_vs_random", "vs_random_summary", "vs_random_marker"]
+    ].copy()
+    pivot_df = pivot_source.pivot(index="Signal", columns="metric_key")
+    pivot_df.columns = [f"{metric_key}_{stat_name}" for stat_name, metric_key in pivot_df.columns]
+    pivot_df = pivot_df.reset_index()
+    summary_df = summary_df.merge(pivot_df, on="Signal", how="left")
+    return summary_df, prevalence
 
 
 def write_main_residue_alignment_table(
@@ -254,6 +380,9 @@ def write_main_residue_alignment_table(
                 )
                 for row in summary_df.itertuples(index=False)
             ],
+            "AUROC vs random": summary_df.get("auroc_vs_random_summary", pd.Series(["NA"] * len(summary_df))),
+            "AUPRC vs random": summary_df.get("auprc_vs_random_summary", pd.Series(["NA"] * len(summary_df))),
+            "Precision@k vs random": summary_df.get("precision_at_k_vs_random_summary", pd.Series(["NA"] * len(summary_df))),
         }
     )
     _write_table_outputs(table_df, csv_path, tex_path)
@@ -295,6 +424,27 @@ def plot_main_residue_alignment_subset(
             color=METRIC_COLOR_MAP[metric_key],
             label=metric_labels[metric_key],
         )
+        marker_col = f"{metric_key}_vs_random_marker"
+        diff_col = f"{metric_key}_mean_diff_vs_random"
+        if marker_col in summary_df.columns and diff_col in summary_df.columns:
+            for mean_value, y_pos, marker_value, mean_diff in zip(
+                means,
+                y_positions + offsets[metric_key],
+                summary_df[marker_col],
+                summary_df[diff_col],
+            ):
+                if pd.isna(marker_value) or str(marker_value) == "ns":
+                    continue
+                direction = "↑" if float(mean_diff) > 0 else "↓"
+                ax.text(
+                    float(mean_value) + 0.018,
+                    float(y_pos),
+                    f"{direction}{marker_value}",
+                    color=METRIC_COLOR_MAP[metric_key],
+                    fontsize=max(FONT_TICK - 0.3, 6.0),
+                    ha="left",
+                    va="center",
+                )
 
     ax.axvline(0.5, color="#7F7F7F", linestyle="--", linewidth=1.0, label="AUROC random baseline")
     if not pd.isna(prevalence):
@@ -312,8 +462,8 @@ def plot_main_residue_alignment_subset(
     ax.set_xlim(0.0, 1.0)
     ax.invert_yaxis()
     _style_axes(ax)
-    ax.legend(frameon=False, fontsize=FONT_LEGEND, loc="lower right")
-    fig.tight_layout()
+    _legend_below(ax, ncol=3, y_offset=-0.23)
+    fig.tight_layout(rect=(0.0, 0.13, 1.0, 1.0))
     _safe_savefig(fig, pdf_path, bbox_inches="tight")
     _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -471,8 +621,8 @@ def plot_supplementary_label_scrambling_sanity_check(
     ax.set_xlabel("AUPRC")
     ax.invert_yaxis()
     _style_axes(ax)
-    ax.legend(frameon=False, fontsize=FONT_LEGEND, loc="lower right")
-    fig.tight_layout()
+    _legend_below(ax, ncol=2, y_offset=-0.18)
+    fig.tight_layout(rect=(0.0, 0.10, 1.0, 1.0))
     _safe_savefig(fig, pdf_path, bbox_inches="tight")
     _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -514,6 +664,16 @@ def plot_main_ig_masking_vs_random(
     random_mean, random_ci_low, random_ci_high = bootstrap_mean_ci(random_df["mean_random_delta_p"])
     ig_best_df = sweep_df.loc[sweep_df["k_pct"].eq(best_k_pct)].copy()
     ig_best_mean, ig_best_ci_low, ig_best_ci_high = bootstrap_mean_ci(ig_best_df["delta_p"])
+    from scipy.stats import wilcoxon
+
+    paired_df = random_df.dropna(subset=["ig_delta_p", "mean_random_delta_p"]).copy()
+    wilcoxon_result = wilcoxon(
+        paired_df["ig_delta_p"].to_numpy(dtype=float),
+        paired_df["mean_random_delta_p"].to_numpy(dtype=float),
+        alternative="two-sided",
+    )
+    p_value = float(wilcoxon_result.pvalue)
+    significance_marker = _significance_marker(p_value)
 
     fig, ax = plt.subplots(figsize=ONE_COLUMN_FIGSIZE)
     ax.plot(
@@ -546,16 +706,46 @@ def plot_main_ig_masking_vs_random(
         [best_k_pct],
         [ig_best_mean],
         yerr=[[ig_best_mean - ig_best_ci_low], [ig_best_ci_high - ig_best_mean]],
-        fmt="o",
-        markersize=4.5,
+        fmt="none",
         capsize=3,
-        color="#4C72B0",
+        ecolor="#4C72B0",
+        elinewidth=1.4,
+    )
+    ax.scatter(
+        [best_k_pct],
+        [ig_best_mean],
+        s=44,
+        facecolors="white",
+        edgecolors="#4C72B0",
+        linewidths=1.6,
+        zorder=5,
+    )
+    y_top = max(random_ci_high, ig_best_ci_high)
+    y_bottom = min(random_mean, ig_best_mean)
+    y_range = max(float(ig_summary_df["ci_high"].max()) - float(ig_summary_df["ci_low"].min()), 1e-6)
+    bracket_x = best_k_pct + 0.022
+    tick_width = 0.012
+    ax.plot(
+        [bracket_x, bracket_x + tick_width, bracket_x + tick_width, bracket_x],
+        [ig_best_mean, ig_best_mean, random_mean, random_mean],
+        color="black",
+        linewidth=1.1,
+    )
+    ax.text(
+        bracket_x + tick_width * 0.5,
+        y_top + 0.03 * y_range,
+        significance_marker,
+        ha="center",
+        va="bottom",
+        fontsize=FONT_AXIS + 1,
     )
     ax.set_xlabel("Top-k percentage")
     ax.set_ylabel("Mean Δp")
+    ax.set_xlim(float(ig_summary_df["k_pct"].min()) - 0.025, float(ig_summary_df["k_pct"].max()) + 0.025)
+    ax.set_ylim(bottom=min(float(ig_summary_df["ci_low"].min()), y_bottom) - 0.03 * y_range, top=y_top + 0.10 * y_range)
     _style_axes(ax)
-    ax.legend(frameon=False, fontsize=FONT_LEGEND, loc="upper left")
-    fig.tight_layout()
+    _legend_below(ax, ncol=2, y_offset=-0.30)
+    fig.tight_layout(rect=(0.0, 0.22, 1.0, 1.0))
     _safe_savefig(fig, pdf_path, bbox_inches="tight")
     _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -564,6 +754,7 @@ def plot_main_ig_masking_vs_random(
         "n_proteins": int(random_df["sequence_id"].nunique()),
         "ig_summary_df": ig_summary_df,
         "random_mean": random_mean,
+        "wilcoxon_p": p_value,
     }
 
 
@@ -609,3 +800,45 @@ def plot_main_saturation_mutagenesis_summary(
     _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return True
+
+
+def render_main_mutagenesis_transition_figures(
+    results_dir: Path,
+    paper_figures_dir: Path,
+) -> dict[str, Path]:
+    from .plotting_insilico_mutagenesis import (
+        CHARGE_POLARITY_CLASSES,
+        HYDROPHOBICITY_AROMATICITY_CLASSES,
+        _build_normalized_transition_matrix,
+        _build_transition_dataframe,
+        _plot_transition_class_heatmap,
+        _plot_transition_scatter,
+        _summarize_transition_residues,
+    )
+
+    annotated_csv = Path(results_dir) / "insilico_mutagenesis" / "saturation_mutagenesis_annotated.csv"
+    if not annotated_csv.exists():
+        return {}
+
+    annotated_df = pd.read_csv(annotated_csv)
+    transition_df = _build_transition_dataframe(annotated_df)
+    residue_summary_df = _summarize_transition_residues(transition_df)
+    charge_matrix = _build_normalized_transition_matrix(transition_df, CHARGE_POLARITY_CLASSES)
+    hydrophobicity_matrix = _build_normalized_transition_matrix(transition_df, HYDROPHOBICITY_AROMATICITY_CLASSES)
+
+    outputs = {
+        "residue_scatter_pdf": Path(paper_figures_dir) / "main_transition_residue_scatter.pdf",
+        "residue_scatter_png": Path(paper_figures_dir) / "main_transition_residue_scatter.png",
+        "charge_heatmap_pdf": Path(paper_figures_dir) / "main_transition_charge_polarity_heatmap.pdf",
+        "charge_heatmap_png": Path(paper_figures_dir) / "main_transition_charge_polarity_heatmap.png",
+        "hydrophobicity_heatmap_pdf": Path(paper_figures_dir) / "main_transition_hydrophobicity_heatmap.pdf",
+        "hydrophobicity_heatmap_png": Path(paper_figures_dir) / "main_transition_hydrophobicity_heatmap.png",
+    }
+
+    _plot_transition_scatter(residue_summary_df, outputs["residue_scatter_pdf"])
+    _plot_transition_scatter(residue_summary_df, outputs["residue_scatter_png"])
+    _plot_transition_class_heatmap(charge_matrix, outputs["charge_heatmap_pdf"])
+    _plot_transition_class_heatmap(charge_matrix, outputs["charge_heatmap_png"])
+    _plot_transition_class_heatmap(hydrophobicity_matrix, outputs["hydrophobicity_heatmap_pdf"])
+    _plot_transition_class_heatmap(hydrophobicity_matrix, outputs["hydrophobicity_heatmap_png"])
+    return outputs

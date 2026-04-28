@@ -402,11 +402,10 @@ def _plot_ig_vs_random_diagnostics(ig_vs_random_baseline_df: pd.DataFrame, outpu
     )
 
     dist_plot_path = output_dir / "ig_vs_random_baseline_distribution.png"
-    palette = {"IG top-k": "#4C72B0", "Random k": "#999999"}
     fig, ax = plt.subplots(figsize=(ICML_ONE_COLUMN_WIDTH, PAPER_MEDIUM_HEIGHT))
     for row in paired_df.itertuples(index=False):
         ax.plot([0, 1], [row.ig_delta_p, row.mean_random_delta_p], color="lightgray", alpha=0.25, zorder=0)
-    sns.violinplot(data=plot_df, x="strategy", y="delta_p", inner=None, cut=0, palette=palette, ax=ax)
+    sns.violinplot(data=plot_df, x="strategy", y="delta_p", inner=None, cut=0, color="#B8C7E0", ax=ax)
     sns.stripplot(data=plot_df, x="strategy", y="delta_p", color="black", alpha=0.25, size=3.5, ax=ax)
     for x_pos, strategy in enumerate(["IG top-k", "Random k"]):
         mean_value, ci_low, ci_high = bootstrap_ci_mean(plot_df.loc[plot_df["strategy"] == strategy, "delta_p"].to_numpy())
@@ -493,7 +492,7 @@ def _plot_transition_scatter(summary_df: pd.DataFrame, output_path: Path) -> Non
     fig, ax = plt.subplots(figsize=(ICML_ONE_COLUMN_WIDTH, PAPER_TALL_HEIGHT))
     ax.scatter(df["plot_x"], df["plot_y"], s=sizes, c=colors, alpha=0.78, edgecolors="black", linewidth=0.6, zorder=3)
     ax.axhline(0, color="black", linewidth=1, linestyle="--", alpha=0.45, zorder=1)
-    ax.axvline(df["frac_reducing"].mean(), color="gray", linewidth=1, linestyle="--", alpha=0.45, zorder=1)
+    ax.axvline(0.5, color="gray", linewidth=1, linestyle="--", alpha=0.45, zorder=1)
     residues_to_label = _select_labels_for_scatter(df)
     texts = []
     for _, row in df.iterrows():
@@ -512,9 +511,19 @@ def _plot_transition_scatter(summary_df: pd.DataFrame, output_path: Path) -> Non
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(float(df["plot_y"].min()) - y_pad, float(df["plot_y"].max()) + y_pad)
     legend_handles = [Patch(color=color, label=label) for label, color in BAR_CLASS_COLORS.items() if label in set(df["class"])]
-    ax.legend(handles=legend_handles, title="Residue class", loc="upper left", fontsize=max(PAPER_ANNOT_FONTSIZE - 1, 6), title_fontsize=max(PAPER_ANNOT_FONTSIZE - 1, 6), frameon=True)
+    ax.legend(
+        handles=legend_handles,
+        title="Residue class",
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.24),
+        ncol=2,
+        fontsize=max(PAPER_ANNOT_FONTSIZE - 1, 6),
+        title_fontsize=max(PAPER_ANNOT_FONTSIZE - 1, 6),
+        frameon=True,
+        borderaxespad=0.0,
+    )
     ax.spines[["top", "right"]].set_visible(False)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
     fig.savefig(output_path, bbox_inches="tight", dpi=300)
     plt.close(fig)
 
