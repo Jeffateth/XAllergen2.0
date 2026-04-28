@@ -1,0 +1,35 @@
+\begin{tabular}{lllllrrlrlrlr}
+\toprule
+model_family & method & method_key & method_category & label_variant & n_proteins & AUROC mean & AUROC 95% CI & AUPRC mean & AUPRC 95% CI & Precision@k mean & Precision@k 95% CI & residue epitope prevalence \\
+\midrule
+Frozen ESM-2 & Random & random_mean & Null baseline & original & 61 & 0.500665 & 0.501 [0.499, 0.502] & 0.267296 & 0.267 [0.218, 0.320] & 0.250079 & 0.250 [0.200, 0.303] & 0.219401 \\
+Frozen ESM-2 & Random & random_mean & Null baseline & scrambled & 61 & 0.498782 & 0.499 [0.497, 0.500] & 0.267202 & 0.267 [0.217, 0.319] & 0.249220 & 0.249 [0.199, 0.302] & NaN \\
+Frozen ESM-2 & Attention & attention_weights & Model-internal signal & original & 61 & 0.467818 & 0.468 [0.441, 0.495] & 0.252829 & 0.253 [0.202, 0.306] & 0.216328 & 0.216 [0.162, 0.272] & 0.219401 \\
+Frozen ESM-2 & Attention & attention_weights & Model-internal signal & scrambled & 61 & 0.507199 & 0.507 [0.493, 0.522] & 0.267832 & 0.268 [0.218, 0.320] & 0.252377 & 0.252 [0.200, 0.306] & NaN \\
+Frozen ESM-2 & IG & integrated_gradients & Post-hoc attribution & original & 61 & 0.475629 & 0.476 [0.443, 0.511] & 0.257413 & 0.257 [0.206, 0.315] & 0.215655 & 0.216 [0.162, 0.275] & 0.219401 \\
+Frozen ESM-2 & IG & integrated_gradients & Post-hoc attribution & scrambled & 61 & 0.499078 & 0.499 [0.485, 0.512] & 0.266079 & 0.266 [0.215, 0.320] & 0.249213 & 0.249 [0.196, 0.303] & NaN \\
+Frozen ESM-2 & Grad×Input & gradient_x_input & Post-hoc attribution & original & 61 & 0.481577 & 0.482 [0.459, 0.504] & 0.265529 & 0.266 [0.214, 0.321] & 0.238386 & 0.238 [0.184, 0.296] & 0.219401 \\
+Frozen ESM-2 & Grad×Input & gradient_x_input & Post-hoc attribution & scrambled & 61 & 0.501563 & 0.502 [0.487, 0.517] & 0.264728 & 0.265 [0.215, 0.317] & 0.250110 & 0.250 [0.200, 0.302] & NaN \\
+Frozen ESM-2 & SmoothGrad-IG & smoothgrad_ig & Post-hoc attribution & original & 61 & 0.475688 & 0.476 [0.442, 0.511] & 0.256942 & 0.257 [0.206, 0.315] & 0.214038 & 0.214 [0.160, 0.273] & 0.219401 \\
+Frozen ESM-2 & SmoothGrad-IG & smoothgrad_ig & Post-hoc attribution & scrambled & 61 & 0.496912 & 0.497 [0.479, 0.515] & 0.268717 & 0.269 [0.220, 0.320] & 0.249598 & 0.250 [0.200, 0.301] & NaN \\
+Frozen ESM-2 & Occlusion & occlusion & Perturbation sensitivity & original & 61 & 0.495993 & 0.496 [0.480, 0.511] & 0.263650 & 0.264 [0.214, 0.315] & 0.235171 & 0.235 [0.182, 0.292] & 0.219401 \\
+Frozen ESM-2 & Occlusion & occlusion & Perturbation sensitivity & scrambled & 61 & 0.496785 & 0.497 [0.485, 0.508] & 0.267716 & 0.268 [0.217, 0.321] & 0.255473 & 0.255 [0.207, 0.307] & NaN \\
+MTL ESM-2 & Random & random_mean & Null baseline & original & 61 & 0.500665 & 0.501 [0.499, 0.502] & 0.267296 & 0.267 [0.218, 0.320] & 0.250079 & 0.250 [0.200, 0.303] & 0.219401 \\
+MTL ESM-2 & Random & random_mean & Null baseline & scrambled & 61 & 0.498782 & 0.499 [0.497, 0.500] & 0.267202 & 0.267 [0.217, 0.319] & 0.249220 & 0.249 [0.199, 0.302] & NaN \\
+MTL ESM-2 & Attention & attention_weights & Model-internal signal & original & 61 & 0.467339 & 0.467 [0.441, 0.494] & 0.252136 & 0.252 [0.201, 0.305] & 0.215726 & 0.216 [0.163, 0.270] & 0.219401 \\
+MTL ESM-2 & Attention & attention_weights & Model-internal signal & scrambled & 61 & 0.496310 & 0.496 [0.481, 0.511] & 0.262889 & 0.263 [0.215, 0.313] & 0.249606 & 0.250 [0.200, 0.302] & NaN \\
+MTL ESM-2 & IG & integrated_gradients & Post-hoc attribution & original & 61 & 0.474592 & 0.475 [0.437, 0.514] & 0.261076 & 0.261 [0.207, 0.318] & 0.225570 & 0.226 [0.170, 0.286] & 0.219401 \\
+MTL ESM-2 & IG & integrated_gradients & Post-hoc attribution & scrambled & 61 & 0.505269 & 0.505 [0.492, 0.519] & 0.265941 & 0.266 [0.216, 0.318] & 0.252983 & 0.253 [0.203, 0.305] & NaN \\
+MTL ESM-2 & Grad×Input & gradient_x_input & Post-hoc attribution & original & 61 & 0.478647 & 0.479 [0.458, 0.501] & 0.262324 & 0.262 [0.211, 0.316] & 0.235237 & 0.235 [0.183, 0.289] & 0.219401 \\
+MTL ESM-2 & Grad×Input & gradient_x_input & Post-hoc attribution & scrambled & 61 & 0.500737 & 0.501 [0.488, 0.514] & 0.266159 & 0.266 [0.215, 0.318] & 0.257229 & 0.257 [0.204, 0.312] & NaN \\
+MTL ESM-2 & SmoothGrad-IG & smoothgrad_ig & Post-hoc attribution & original & 61 & 0.473279 & 0.473 [0.436, 0.513] & 0.260383 & 0.260 [0.206, 0.317] & 0.226205 & 0.226 [0.170, 0.287] & 0.219401 \\
+MTL ESM-2 & SmoothGrad-IG & smoothgrad_ig & Post-hoc attribution & scrambled & 61 & 0.501966 & 0.502 [0.488, 0.516] & 0.268529 & 0.269 [0.218, 0.320] & 0.254951 & 0.255 [0.202, 0.307] & NaN \\
+MTL ESM-2 & Occlusion & occlusion & Perturbation sensitivity & original & 61 & 0.490764 & 0.491 [0.472, 0.508] & 0.264757 & 0.265 [0.216, 0.317] & 0.240664 & 0.241 [0.187, 0.295] & 0.219401 \\
+MTL ESM-2 & Occlusion & occlusion & Perturbation sensitivity & scrambled & 61 & 0.508435 & 0.508 [0.493, 0.525] & 0.271427 & 0.271 [0.221, 0.325] & 0.260445 & 0.260 [0.208, 0.313] & NaN \\
+MTL ESM-2 & Residue head & residue_head & Supervised residue predictor & original & 61 & 0.633684 & 0.634 [0.594, 0.672] & 0.372437 & 0.372 [0.307, 0.442] & 0.344942 & 0.345 [0.282, 0.413] & 0.219401 \\
+MTL ESM-2 & Residue head & residue_head & Supervised residue predictor & scrambled & 61 & 0.503192 & 0.503 [0.489, 0.516] & 0.271119 & 0.271 [0.221, 0.325] & 0.254557 & 0.255 [0.204, 0.308] & NaN \\
+DeepPlantAllergy & Random & random_mean & Null baseline & original & 61 & 0.500264 & 0.500 [0.499, 0.502] & 0.267493 & 0.267 [0.217, 0.319] & 0.250100 & 0.250 [0.200, 0.302] & 0.219401 \\
+DeepPlantAllergy & Attention & attention_weights & Model-internal signal & original & 61 & 0.467745 & 0.468 [0.421, 0.514] & 0.266947 & 0.267 [0.212, 0.324] & 0.221538 & 0.222 [0.156, 0.288] & 0.219401 \\
+DeepPlantAllergy & IG & integrated_gradients & Post-hoc attribution & original & 61 & 0.523805 & 0.524 [0.480, 0.565] & 0.295298 & 0.295 [0.236, 0.359] & 0.254940 & 0.255 [0.194, 0.318] & 0.219401 \\
+\bottomrule
+\end{tabular}

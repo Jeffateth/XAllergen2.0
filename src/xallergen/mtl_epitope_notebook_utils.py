@@ -210,6 +210,28 @@ def prepare_negative_frame(csv_path: Path, split_name: str, frame_name: str) -> 
     return frame, audit
 
 
+def prepare_classification_benchmark_frame(
+    csv_path: Path,
+    split_name: str = "classification_benchmark_test",
+    frame_name: str = "classification_benchmark_test",
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    frame, audit = audit_frame(csv_path, frame_name)
+    require_columns(frame, ["sequence", "label"], csv_path.name)
+    sequence_id_col = get_sequence_id_column(frame, ["sequence_id", "accession", "entry"], csv_path.name)
+    frame = frame.copy()
+    frame["sequence_id"] = frame[sequence_id_col].astype(str)
+    frame["sequence"] = frame["sequence"].astype(str).str.strip().str.upper()
+    frame["protein_label"] = frame["label"].astype(float)
+    frame["seq_len"] = frame["sequence"].str.len().astype(int)
+    frame["epitope_label"] = frame["seq_len"].map(lambda seq_len: np.zeros(seq_len, dtype=np.float32))
+    frame["n_epitope_residues"] = 0
+    frame["epitope_density"] = 0.0
+    frame["has_epitope_supervision"] = 0
+    frame["split_name"] = split_name
+    frame["data_source"] = "classification_benchmark"
+    return frame, audit
+
+
 def build_mixed_frame(positive_frame: pd.DataFrame, negative_frame: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "sequence_id",
@@ -405,6 +427,23 @@ def build_dataloaders(
     return train_loader, val_loader, test_loader
 
 
+def build_eval_dataloader(
+    eval_df: pd.DataFrame,
+    tokenizer,
+    batch_size: int,
+) -> DataLoader:
+    def _collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        return collate_mixed_batch(batch, tokenizer)
+
+    return DataLoader(
+        MixedAllergenEpitopeDataset(eval_df),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=_collate,
+    )
+
+
 def compute_loss_weights(
     positive_train_df: pd.DataFrame,
     negative_train_df: pd.DataFrame,
@@ -489,7 +528,7 @@ def compute_masked_residue_loss(
     valid_mask = residue_loss_mask.bool()
     valid_count = int(valid_mask.sum().item())
     if valid_count == 0:
-        return residue_logits.sum() * 0.0, 0
+        return torch.zeros((), device=residue_logits.device, dtype=residue_logits.dtype), 0
 
     valid_logits = residue_logits[valid_mask]
     valid_labels = residue_labels[valid_mask]
@@ -896,6 +935,8 @@ def evaluate_saved_mtl_checkpoint(
     esm_model_name: str = ESM_MODEL_NAME,
     model_name: str = HF_MODEL_NAME,
     early_stopped: bool = False,
+    classification_test_loader: DataLoader | None = None,
+    classification_test_name: str = "classification_benchmark_test",
 ) -> dict[str, Any]:
     model, checkpoint = load_mtl_checkpoint(
         checkpoint_path,
@@ -932,20 +973,46 @@ def evaluate_saved_mtl_checkpoint(
 
     val_predictions_df, val_residue_payload = predict_mtl(model, val_loader, device)
     test_predictions_df, test_residue_payload = predict_mtl(model, test_loader, device)
+    benchmark_predictions_df = None
+    benchmark_stats = None
+    if classification_test_loader is not None:
+        benchmark_stats = evaluate_mtl(
+            model,
+            classification_test_loader,
+            device,
+            protein_pos_weight=protein_pos_weight,
+            residue_pos_weight=residue_pos_weight,
+            lambda_cls=lambda_cls,
+            lambda_epi=lambda_epi,
+        )
+        benchmark_predictions_df, _ = predict_mtl(model, classification_test_loader, device)
 
     val_classification_metrics = compute_classification_metrics(val_predictions_df)
     val_residue_metrics = compute_flattened_residue_metrics(
         val_residue_payload["residue_labels_flat"],
         val_residue_payload["residue_scores_flat"],
     )
-    test_metrics = compute_classification_metrics(test_predictions_df)
-    test_metrics["test_total_loss"] = float(test_stats["total_loss"])
-    test_metrics["test_cls_loss"] = float(test_stats["cls_loss"])
-    test_metrics["test_epi_loss"] = float(test_stats["epi_loss"])
-    test_metrics["test_weighted_cls"] = float(test_stats["weighted_cls"])
-    test_metrics["test_weighted_epi"] = float(test_stats["weighted_epi"])
-    test_metrics["best_epoch"] = best_epoch
-    test_metrics["n_test_sequences"] = int(len(test_predictions_df))
+    splitb_test_metrics = compute_classification_metrics(test_predictions_df)
+    splitb_test_metrics["test_total_loss"] = float(test_stats["total_loss"])
+    splitb_test_metrics["test_cls_loss"] = float(test_stats["cls_loss"])
+    splitb_test_metrics["test_epi_loss"] = float(test_stats["epi_loss"])
+    splitb_test_metrics["test_weighted_cls"] = float(test_stats["weighted_cls"])
+    splitb_test_metrics["test_weighted_epi"] = float(test_stats["weighted_epi"])
+    splitb_test_metrics["best_epoch"] = best_epoch
+    splitb_test_metrics["n_test_sequences"] = int(len(test_predictions_df))
+    splitb_test_metrics["dataset_name"] = "splitB_mixed"
+
+    test_metrics = dict(splitb_test_metrics)
+    if benchmark_predictions_df is not None and benchmark_stats is not None:
+        test_metrics = compute_classification_metrics(benchmark_predictions_df)
+        test_metrics["test_total_loss"] = float(benchmark_stats["total_loss"])
+        test_metrics["test_cls_loss"] = float(benchmark_stats["cls_loss"])
+        test_metrics["test_epi_loss"] = float(benchmark_stats["epi_loss"])
+        test_metrics["test_weighted_cls"] = float(benchmark_stats["weighted_cls"])
+        test_metrics["test_weighted_epi"] = float(benchmark_stats["weighted_epi"])
+        test_metrics["best_epoch"] = best_epoch
+        test_metrics["n_test_sequences"] = int(len(benchmark_predictions_df))
+        test_metrics["dataset_name"] = classification_test_name
 
     test_residue_metrics = compute_flattened_residue_metrics(
         test_residue_payload["residue_labels_flat"],
@@ -986,6 +1053,7 @@ def evaluate_saved_mtl_checkpoint(
         "validation_classification_metrics": val_classification_metrics,
         "validation_residue_metrics": val_residue_metrics,
         "test_metrics": test_metrics,
+        "splitB_test_metrics": splitb_test_metrics,
         "test_residue_metrics": test_residue_metrics,
     }
 
@@ -999,6 +1067,9 @@ def evaluate_saved_mtl_checkpoint(
     print(json.dumps(val_residue_metrics, indent=2))
     print("Test classification metrics:")
     print(json.dumps(test_metrics, indent=2))
+    if classification_test_loader is not None:
+        print("Split B classification metrics:")
+        print(json.dumps(splitb_test_metrics, indent=2))
     print("Test residue metrics:")
     print(json.dumps(test_residue_metrics, indent=2))
     print(f"Saved metrics to: {metrics_path}")
@@ -1012,6 +1083,7 @@ def evaluate_saved_mtl_checkpoint(
         "test_stats": test_stats,
         "val_predictions_df": val_predictions_df,
         "test_predictions_df": test_predictions_df,
+        "classification_test_predictions_df": benchmark_predictions_df,
         "val_residue_payload": val_residue_payload,
         "test_residue_payload": test_residue_payload,
         "metrics_payload": metrics_payload,
@@ -2064,6 +2136,27 @@ def load_protein_level_metrics(
     metric_rows = []
     diagnostic_rows = []
 
+    def normalize_test_metrics(payload: dict[str, Any]) -> dict[str, Any]:
+        nested = payload.get("test_metrics")
+        if isinstance(nested, dict):
+            return nested
+
+        # DeepPlantAllergy stores test metrics as top-level keys rather than under `test_metrics`.
+        confusion_keys = ("TP", "TN", "FP", "FN")
+        if payload.get("Split") == "Test" and "ROC-AUC" in payload:
+            n_test_sequences = None
+            if all(key in payload for key in confusion_keys):
+                n_test_sequences = sum(int(payload[key]) for key in confusion_keys)
+            return {
+                "auroc": payload.get("ROC-AUC"),
+                "auprc": payload.get("AUPRC"),
+                "mcc": payload.get("MCC"),
+                "accuracy": payload.get("Accuracy"),
+                "n_test_sequences": n_test_sequences,
+            }
+
+        return {}
+
     for spec in registry:
         found_path = None
         payload = None
@@ -2085,7 +2178,7 @@ def load_protein_level_metrics(
         )
         if payload is None:
             continue
-        test_metrics = payload.get("test_metrics", {})
+        test_metrics = normalize_test_metrics(payload)
         metric_rows.append(
             {
                 "family_key": spec["family_key"],

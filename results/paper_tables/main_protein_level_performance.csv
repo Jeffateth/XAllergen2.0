@@ -1,0 +1,4 @@
+Model,AUROC,AUPRC,MCC,Accuracy,n_test_sequences
+Frozen ESM-2,0.970,0.971,0.835,0.917,1377
+MTL ESM-2,0.902,0.887,0.660,0.831,136
+DeepPlantAllergy,0.974,NA,0.878,0.939,1377

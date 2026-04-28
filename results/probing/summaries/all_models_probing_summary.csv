@@ -1,0 +1,30 @@
+model_family,method,label_variant,method_category,auroc_mean,auroc_ci_low,auroc_ci_high,auprc_mean,auprc_ci_low,auprc_ci_high,precision_at_k_mean,precision_at_k_ci_low,precision_at_k_ci_high,n_proteins
+Frozen ESM-2,random_mean,original,Null baseline,0.5007,0.4993,0.5021,0.2673,0.2176,0.3196,0.2501,0.2,0.3027,61
+Frozen ESM-2,random_mean,scrambled,Null baseline,0.4988,0.4972,0.5003,0.2672,0.2175,0.3191,0.2492,0.199,0.3017,61
+Frozen ESM-2,attention_weights,original,Model-internal signal,0.4678,0.441,0.4948,0.2528,0.2018,0.3056,0.2163,0.1619,0.2717,61
+Frozen ESM-2,attention_weights,scrambled,Model-internal signal,0.5072,0.4926,0.5224,0.2678,0.2176,0.32,0.2524,0.2004,0.3055,61
+Frozen ESM-2,integrated_gradients,original,Post-hoc attribution,0.4756,0.4427,0.5106,0.2574,0.2064,0.3155,0.2157,0.1622,0.2745,61
+Frozen ESM-2,integrated_gradients,scrambled,Post-hoc attribution,0.4991,0.4854,0.5116,0.2661,0.2153,0.3202,0.2492,0.1962,0.3025,61
+Frozen ESM-2,gradient_x_input,original,Post-hoc attribution,0.4816,0.4592,0.5044,0.2655,0.2136,0.3214,0.2384,0.184,0.2957,61
+Frozen ESM-2,gradient_x_input,scrambled,Post-hoc attribution,0.5016,0.4866,0.5166,0.2647,0.2151,0.3171,0.2501,0.2003,0.3022,61
+Frozen ESM-2,smoothgrad_ig,original,Post-hoc attribution,0.4757,0.4421,0.5109,0.2569,0.206,0.3149,0.214,0.1604,0.2732,61
+Frozen ESM-2,smoothgrad_ig,scrambled,Post-hoc attribution,0.4969,0.479,0.5153,0.2687,0.2196,0.3203,0.2496,0.2001,0.3014,61
+Frozen ESM-2,occlusion,original,Perturbation sensitivity,0.496,0.4798,0.5113,0.2637,0.2143,0.3153,0.2352,0.182,0.2917,61
+Frozen ESM-2,occlusion,scrambled,Perturbation sensitivity,0.4968,0.4853,0.5082,0.2677,0.2172,0.3208,0.2555,0.2069,0.3066,61
+MTL ESM-2,random_mean,original,Null baseline,0.5007,0.4993,0.5021,0.2673,0.2176,0.3196,0.2501,0.2,0.3027,61
+MTL ESM-2,random_mean,scrambled,Null baseline,0.4988,0.4972,0.5003,0.2672,0.2175,0.3191,0.2492,0.199,0.3017,61
+MTL ESM-2,attention_weights,original,Model-internal signal,0.4673,0.4414,0.4943,0.2521,0.2013,0.3047,0.2157,0.1627,0.2705,61
+MTL ESM-2,attention_weights,scrambled,Model-internal signal,0.4963,0.4808,0.511,0.2629,0.2148,0.3131,0.2496,0.2001,0.3022,61
+MTL ESM-2,integrated_gradients,original,Post-hoc attribution,0.4746,0.4369,0.5144,0.2611,0.2075,0.3184,0.2256,0.1701,0.2865,61
+MTL ESM-2,integrated_gradients,scrambled,Post-hoc attribution,0.5053,0.492,0.5192,0.2659,0.2155,0.3184,0.253,0.203,0.3048,61
+MTL ESM-2,gradient_x_input,original,Post-hoc attribution,0.4786,0.4582,0.5012,0.2623,0.2111,0.3164,0.2352,0.1829,0.2893,61
+MTL ESM-2,gradient_x_input,scrambled,Post-hoc attribution,0.5007,0.4877,0.5143,0.2662,0.2153,0.3178,0.2572,0.2043,0.312,61
+MTL ESM-2,smoothgrad_ig,original,Post-hoc attribution,0.4733,0.4356,0.5128,0.2604,0.2065,0.3174,0.2262,0.1702,0.2868,61
+MTL ESM-2,smoothgrad_ig,scrambled,Post-hoc attribution,0.502,0.4879,0.5157,0.2685,0.2183,0.3201,0.255,0.2016,0.3073,61
+MTL ESM-2,occlusion,original,Perturbation sensitivity,0.4908,0.4724,0.5081,0.2648,0.2156,0.3171,0.2407,0.1868,0.2948,61
+MTL ESM-2,occlusion,scrambled,Perturbation sensitivity,0.5084,0.4928,0.5247,0.2714,0.2207,0.3247,0.2604,0.2078,0.3134,61
+MTL ESM-2,residue_head,original,Supervised residue predictor,0.6337,0.5941,0.6715,0.3724,0.3066,0.442,0.3449,0.2816,0.4128,61
+MTL ESM-2,residue_head,scrambled,Supervised residue predictor,0.5032,0.4893,0.5165,0.2711,0.2207,0.3253,0.2546,0.2036,0.3081,61
+DeepPlantAllergy,random_mean,original,Null baseline,0.5003,0.4987,0.5017,0.2675,0.2175,0.3194,0.2501,0.2003,0.3023,61
+DeepPlantAllergy,attention_weights,original,Model-internal signal,0.4677,0.4213,0.5142,0.2669,0.212,0.3245,0.2215,0.1558,0.2878,61
+DeepPlantAllergy,integrated_gradients,original,Post-hoc attribution,0.5238,0.4804,0.5649,0.2953,0.2359,0.3589,0.2549,0.1935,0.3178,61
