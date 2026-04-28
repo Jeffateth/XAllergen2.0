@@ -43,8 +43,8 @@ Run notebooks in order to reproduce the full pipeline:
 5. `notebooks/04_mtl_epitope_supervision.ipynb`
 6. `notebooks/05_mtl_top1_unfrozen_epitope_supervision.ipynb`
 7. `notebooks/06_generate_probe_rows.ipynb`
-8. `notebooks/07_compare_all_model_probes.ipynb`
-9. `notebooks/08_insilico_mutagenesis.ipynb`
+8. `notebooks/07_insilico_mutagenesis.ipynb`
+9. `notebooks/08_compare_all_model_probes.ipynb`
 
 The retired baseline-top1-unfrozen baseline notebook is kept only for archival reference at `notebooks/Legacy scripts/03_baseline_top1_unfrozen_esm2.ipynb` and is not part of the current analysis workflow.
 

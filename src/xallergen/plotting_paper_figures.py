@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import shutil
+import tempfile
 
 import numpy as np
 import pandas as pd
+import matplotlib
+
+matplotlib.use("Agg", force=True)
 
 from .mtl_epitope_notebook_utils import (
     MTLOutputPaths,
@@ -141,6 +146,19 @@ def _write_table_outputs(df: pd.DataFrame, csv_path: Path, tex_path: Path | None
         tex_path.parent.mkdir(parents=True, exist_ok=True)
         latex = df.to_latex(index=False, escape=False)
         tex_path.write_text(latex, encoding="utf-8")
+
+
+def _safe_savefig(fig, path: Path, **kwargs) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix or ".tmp"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        fig.savefig(tmp_path, **kwargs)
+        shutil.move(str(tmp_path), str(path))
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
 def compute_residue_prevalence(frame: pd.DataFrame) -> float:
@@ -296,9 +314,8 @@ def plot_main_residue_alignment_subset(
     _style_axes(ax)
     ax.legend(frameon=False, fontsize=FONT_LEGEND, loc="lower right")
     fig.tight_layout()
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(pdf_path, bbox_inches="tight")
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    _safe_savefig(fig, pdf_path, bbox_inches="tight")
+    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -409,9 +426,8 @@ def plot_supplementary_all_signals_heatmap(
     ax.set_ylabel("")
     _style_axes(ax)
     fig.tight_layout()
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(pdf_path, bbox_inches="tight")
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    _safe_savefig(fig, pdf_path, bbox_inches="tight")
+    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return True
 
@@ -457,9 +473,8 @@ def plot_supplementary_label_scrambling_sanity_check(
     _style_axes(ax)
     ax.legend(frameon=False, fontsize=FONT_LEGEND, loc="lower right")
     fig.tight_layout()
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(pdf_path, bbox_inches="tight")
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    _safe_savefig(fig, pdf_path, bbox_inches="tight")
+    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return True
 
@@ -541,9 +556,8 @@ def plot_main_ig_masking_vs_random(
     _style_axes(ax)
     ax.legend(frameon=False, fontsize=FONT_LEGEND, loc="upper left")
     fig.tight_layout()
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(pdf_path, bbox_inches="tight")
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    _safe_savefig(fig, pdf_path, bbox_inches="tight")
+    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return {
         "best_k_pct": best_k_pct,
@@ -591,8 +605,7 @@ def plot_main_saturation_mutagenesis_summary(
     ax.invert_yaxis()
     _style_axes(ax)
     fig.tight_layout()
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(pdf_path, bbox_inches="tight")
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    _safe_savefig(fig, pdf_path, bbox_inches="tight")
+    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return True
