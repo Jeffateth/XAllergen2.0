@@ -1,0 +1,4 @@
+model_family,method,label_variant,method_category,auroc_mean,auroc_ci_low,auroc_ci_high,auprc_mean,auprc_ci_low,auprc_ci_high,precision_at_k_mean,precision_at_k_ci_low,precision_at_k_ci_high,n_proteins
+DeepPlantAllergy,attention_weights,original,Model-internal signal,0.4677,0.4213,0.5142,0.2669,0.212,0.3245,0.2215,0.1558,0.2878,61
+DeepPlantAllergy,integrated_gradients,original,Post-hoc attribution,0.5238,0.4804,0.5649,0.2953,0.2359,0.3589,0.2549,0.1935,0.3178,61
+DeepPlantAllergy,random_mean,original,Null baseline,0.5003,0.4987,0.5017,0.2675,0.2175,0.3194,0.2501,0.2003,0.3023,61

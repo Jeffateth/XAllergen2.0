@@ -1,0 +1,7 @@
+model_family,method,label_variant,method_category,auroc_mean,auroc_ci_low,auroc_ci_high,auprc_mean,auprc_ci_low,auprc_ci_high,precision_at_k_mean,precision_at_k_ci_low,precision_at_k_ci_high,n_proteins
+Frozen ESM-2,attention_weights,original,Model-internal signal,0.4678,0.441,0.4948,0.2528,0.2018,0.3056,0.2163,0.1619,0.2717,61
+Frozen ESM-2,integrated_gradients,original,Post-hoc attribution,0.4756,0.4427,0.5106,0.2574,0.2064,0.3155,0.2157,0.1622,0.2745,61
+Frozen ESM-2,gradient_x_input,original,Post-hoc attribution,0.4816,0.4592,0.5044,0.2655,0.2136,0.3214,0.2384,0.184,0.2957,61
+Frozen ESM-2,smoothgrad_ig,original,Post-hoc attribution,0.4747,0.4414,0.51,0.2571,0.206,0.3152,0.2154,0.1614,0.2742,61
+Frozen ESM-2,occlusion,original,Perturbation sensitivity,0.496,0.4798,0.5113,0.2637,0.2143,0.3153,0.2352,0.182,0.2917,61
+Frozen ESM-2,random_mean,original,Null baseline,0.5017,0.5003,0.5032,0.2678,0.2182,0.3199,0.2501,0.1999,0.3022,61

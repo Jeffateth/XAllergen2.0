@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import random
 from pathlib import Path
@@ -61,6 +62,12 @@ def find_project_root(start: Path) -> Path:
     raise FileNotFoundError(
         "Could not locate project root. Make sure VSCode is opened from inside the XAllergen2.0 folder."
     )
+
+
+def cudnn_backward_safe_context(device: str):
+    if str(device).startswith("cuda"):
+        return torch.backends.cudnn.flags(enabled=False)
+    return contextlib.nullcontext()
 
 
 def seed_everything(seed: int = RANDOM_STATE) -> None:
@@ -341,15 +348,25 @@ def compute_integrated_gradients(
     residue_embeddings = compute_residue_embeddings(embedding_model, tokenizer, sequence, device)
     baseline = torch.zeros_like(residue_embeddings)
 
+    lstm_module = getattr(model, "lstm", None)
+    lstm_training_state = None if lstm_module is None else lstm_module.training
+
     def ig_forward(inputs_embeds: torch.Tensor) -> torch.Tensor:
         return model(inputs_embeds).squeeze(-1)
 
-    attributions = IntegratedGradients(ig_forward).attribute(
-        inputs=residue_embeddings,
-        baselines=baseline,
-        n_steps=steps,
-        internal_batch_size=internal_batch_size,
-    )
+    try:
+        if lstm_module is not None:
+            lstm_module.train()
+        with cudnn_backward_safe_context(device):
+            attributions = IntegratedGradients(ig_forward).attribute(
+                inputs=residue_embeddings,
+                baselines=baseline,
+                n_steps=steps,
+                internal_batch_size=internal_batch_size,
+            )
+    finally:
+        if lstm_module is not None and lstm_training_state is not None:
+            lstm_module.train(lstm_training_state)
     importance = attributions.abs().sum(dim=-1).squeeze(0).detach().cpu().numpy()
     return normalize_scores(importance) if normalize else importance
 
@@ -371,11 +388,23 @@ def run_deep_plant_probe_suite(
     ig_steps: int = IG_STEPS,
     n_random_draws: int = 100,
     max_seq_len: int = MAX_SEQ_LEN,
+    progress_label: str | None = None,
+    enabled_methods: set[str] | None = None,
+    progress_print_every: int = 5,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(RANDOM_STATE)
     results_rows = []
+    enabled_methods = None if enabled_methods is None else set(enabled_methods)
 
-    for _, row in tqdm(eval_df.iterrows(), total=len(eval_df), desc="Evaluating proteins"):
+    def method_enabled(method: str) -> bool:
+        return enabled_methods is None or method in enabled_methods
+
+    progress_desc = progress_label or "Evaluating proteins"
+    total_rows = len(eval_df)
+    for idx, (_, row) in enumerate(
+        tqdm(eval_df.iterrows(), total=total_rows, desc=progress_desc),
+        start=1,
+    ):
         sequence = row["sequence"]
         epitope_labels = row["epitope_label"]
         accession = row["accession"]
@@ -392,47 +421,49 @@ def run_deep_plant_probe_suite(
             "n_epitope_residues": row["n_epitope_residues"],
         }
 
-        attn_scores = None
-        try:
-            attn_scores = compute_attention_weights(model, embedding_model, tokenizer, sequence, device)
-            results_rows.append(
-                {**base, "method": "attention_weights", **compute_probe_metrics(epitope_labels, attn_scores)}
-            )
-        except Exception as exc:
-            print(f"[attention] {accession}: {exc}")
+        if method_enabled("attention_weights"):
+            try:
+                attn_scores = compute_attention_weights(model, embedding_model, tokenizer, sequence, device)
+                results_rows.append(
+                    {**base, "method": "attention_weights", **compute_probe_metrics(epitope_labels, attn_scores)}
+                )
+            except Exception as exc:
+                print(f"[attention] {accession}: {exc}")
 
-        try:
-            ig_scores = compute_integrated_gradients(
-                model,
-                embedding_model,
-                tokenizer,
-                sequence,
-                device,
-                steps=ig_steps,
-                normalize=False,
-            )
+        if method_enabled("integrated_gradients"):
+            try:
+                ig_scores = compute_integrated_gradients(
+                    model,
+                    embedding_model,
+                    tokenizer,
+                    sequence,
+                    device,
+                    steps=ig_steps,
+                    normalize=False,
+                )
+                results_rows.append(
+                    {
+                        **base,
+                        "method": "integrated_gradients",
+                        "ig_scores_json": serialize_score_array(ig_scores),
+                        **compute_probe_metrics(epitope_labels, ig_scores),
+                    }
+                )
+            except Exception as exc:
+                print(f"[IG] {accession}: {exc}")
+
+        if method_enabled("random_mean"):
+            rand_metrics = [
+                compute_probe_metrics(epitope_labels, rng.uniform(0.0, 1.0, size=seq_len))
+                for _ in range(n_random_draws)
+            ]
             results_rows.append(
                 {
                     **base,
-                    "method": "integrated_gradients",
-                    "ig_scores_json": serialize_score_array(ig_scores),
-                    **compute_probe_metrics(epitope_labels, ig_scores),
+                    "method": "random_mean",
+                    **mean_metric_dicts(rand_metrics),
                 }
             )
-        except Exception as exc:
-            print(f"[IG] {accession}: {exc}")
-
-        rand_metrics = [
-            compute_probe_metrics(epitope_labels, rng.uniform(0.0, 1.0, size=seq_len))
-            for _ in range(n_random_draws)
-        ]
-        results_rows.append(
-            {
-                **base,
-                "method": "random_mean",
-                **mean_metric_dicts(rand_metrics),
-            }
-        )
 
         if attn_scores is not None:
             try:
@@ -449,5 +480,8 @@ def run_deep_plant_probe_suite(
                 )
             except Exception as exc:
                 print(f"[shuffled] {accession}: {exc}")
+
+        if progress_print_every > 0 and (idx % progress_print_every == 0 or idx == total_rows):
+            print(f"{progress_desc}: processed {idx}/{total_rows} proteins")
 
     return pd.DataFrame(results_rows)

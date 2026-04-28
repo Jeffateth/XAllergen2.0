@@ -1222,6 +1222,9 @@ def run_probe_suite(
     precomputed_baseline_probe_df: pd.DataFrame | None = None,
     smoothgrad_ig_samples: int = 10,
     smoothgrad_ig_noise_std: float = 0.05,
+    progress_label: str | None = None,
+    enabled_methods: set[str] | None = None,
+    progress_print_every: int = 5,
 ) -> dict[str, pd.DataFrame]:
     ig_probe_device = device
     rng = np.random.default_rng(RANDOM_STATE)
@@ -1242,19 +1245,63 @@ def run_probe_suite(
         "occlusion",
         "random_mean",
     }
+    enabled_methods = None if enabled_methods is None else set(enabled_methods)
+
+    def method_enabled(method: str) -> bool:
+        return enabled_methods is None or method in enabled_methods
+
+    expected_mtl_methods = {method for method in expected_mtl_methods if method_enabled(method)}
+    expected_baseline_methods = {method for method in expected_baseline_methods if method_enabled(method)}
     probe_rows = []
     baseline_probe_rows = []
+    existing_probe_df = pd.DataFrame()
+    existing_baseline_probe_df = pd.DataFrame()
+
+    if resume and output_paths.probe_rows_path.exists():
+        existing_probe_df = ensure_label_variant_column(pd.read_csv(output_paths.probe_rows_path))
+    if resume and output_paths.baseline_probe_rows_path.exists():
+        existing_baseline_probe_df = ensure_label_variant_column(pd.read_csv(output_paths.baseline_probe_rows_path))
+
+    existing_probe_methods = set(existing_probe_df["method"].astype(str)) if not existing_probe_df.empty else set()
+    existing_baseline_methods = (
+        set(existing_baseline_probe_df["method"].astype(str)) if not existing_baseline_probe_df.empty else set()
+    )
+    missing_mtl_methods = expected_mtl_methods - existing_probe_methods
+    missing_baseline_methods = expected_baseline_methods - existing_baseline_methods
+
+    if resume and enabled_methods is None and not missing_mtl_methods and not missing_baseline_methods:
+        combined_probe_df = ensure_label_variant_column(
+            pd.concat([existing_baseline_probe_df, existing_probe_df], ignore_index=True)
+        )
+        print(f"Reusing existing probe rows: {output_paths.probe_rows_path}")
+        print(f"Reusing existing baseline probe rows: {output_paths.baseline_probe_rows_path}")
+        return {
+            "probe_df": existing_probe_df,
+            "baseline_probe_df": existing_baseline_probe_df,
+            "combined_probe_df": combined_probe_df,
+        }
 
     ig_model = model.to(ig_probe_device)
     ig_model.eval()
     baseline_model = None
     baseline_ig_model = None
     use_precomputed_baseline = False
-    if precomputed_baseline_probe_df is not None:
+    if not existing_baseline_probe_df.empty and not missing_baseline_methods:
+        use_precomputed_baseline = True
+        accession_column = "accession"
+        current_accessions = set(epitope_probe_df[accession_column].astype(str))
+        baseline_probe_rows = (
+            existing_baseline_probe_df.loc[
+                existing_baseline_probe_df[accession_column].astype(str).isin(current_accessions)
+            ]
+            .copy()
+            .to_dict("records")
+        )
+    elif precomputed_baseline_probe_df is not None:
         precomputed_baseline_probe_df = ensure_label_variant_column(precomputed_baseline_probe_df)
         precomputed_methods = set(precomputed_baseline_probe_df["method"].astype(str))
         precomputed_label_variants = set(precomputed_baseline_probe_df["label_variant"].astype(str))
-        missing_methods = expected_baseline_methods - precomputed_methods
+        missing_methods = missing_baseline_methods or (expected_baseline_methods - precomputed_methods)
         missing_label_variants = {"original", "scrambled"} - precomputed_label_variants
         use_precomputed_baseline = not missing_methods and not missing_label_variants
         if missing_methods or missing_label_variants:
@@ -1302,7 +1349,12 @@ def run_probe_suite(
         torch.cuda.empty_cache()
 
     processed_since_save = 0
-    for _, row in tqdm(epitope_probe_df.iterrows(), total=len(epitope_probe_df), desc="Probing splitB"):
+    progress_desc = progress_label or "Probing splitB"
+    total_rows = len(epitope_probe_df)
+    for idx, (_, row) in enumerate(
+        tqdm(epitope_probe_df.iterrows(), total=total_rows, desc=progress_desc),
+        start=1,
+    ):
         accession = str(row["accession"])
 
         sequence = row["sequence"]
@@ -1314,21 +1366,26 @@ def run_probe_suite(
             "n_epitope_residues": int(row["n_epitope_residues"]),
         }
 
-        residue_scores = compute_residue_probabilities(ig_model, tokenizer, sequence, ig_probe_device)
-        probe_rows.extend(
-            build_probe_rows_with_label_scrambling(
-                base, output_paths.mtl_family_label, "residue_head", epitope_labels, residue_scores, rng
+        residue_scores = None
+        if "residue_head" in missing_mtl_methods:
+            residue_scores = compute_residue_probabilities(ig_model, tokenizer, sequence, ig_probe_device)
+            probe_rows.extend(
+                build_probe_rows_with_label_scrambling(
+                    base, output_paths.mtl_family_label, "residue_head", epitope_labels, residue_scores, rng
+                )
             )
-        )
 
-        attention_scores = compute_attention_weights(ig_model, tokenizer, sequence, ig_probe_device)
-        probe_rows.extend(
-            build_probe_rows_with_label_scrambling(
-                base, output_paths.mtl_family_label, "attention_weights", epitope_labels, attention_scores, rng
+        attention_scores = None
+        if "attention_weights" in missing_mtl_methods:
+            attention_scores = compute_attention_weights(ig_model, tokenizer, sequence, ig_probe_device)
+            probe_rows.extend(
+                build_probe_rows_with_label_scrambling(
+                    base, output_paths.mtl_family_label, "attention_weights", epitope_labels, attention_scores, rng
+                )
             )
-        )
 
-        if not use_precomputed_baseline:
+        baseline_attention_scores = None
+        if not use_precomputed_baseline and "attention_weights" in missing_baseline_methods:
             baseline_attention_scores = compute_attention_weights(
                 baseline_model, tokenizer, sequence, ig_probe_device
             )
@@ -1342,92 +1399,11 @@ def run_probe_suite(
                     rng,
                 )
             )
-        else:
-            baseline_attention_scores = None
 
-        ig_scores = compute_integrated_gradients(
-            ig_model,
-            tokenizer,
-            sequence,
-            ig_probe_device,
-            steps=ig_steps,
-            normalize=False,
-            internal_batch_size=ig_internal_batch_size,
-        )
-        probe_rows.extend(
-            build_probe_rows_with_label_scrambling(
-                base,
-                output_paths.mtl_family_label,
-                "integrated_gradients",
-                epitope_labels,
-                ig_scores,
-                rng,
-                serialize_scores=True,
-                score_column="ig_scores_json",
-            )
-        )
-
-        gradient_x_input_scores = compute_gradient_x_input_scores(
-            ig_model,
-            tokenizer,
-            sequence,
-            ig_probe_device,
-        )
-        probe_rows.extend(
-            build_probe_rows_with_label_scrambling(
-                base,
-                output_paths.mtl_family_label,
-                "gradient_x_input",
-                epitope_labels,
-                gradient_x_input_scores,
-                rng,
-                serialize_scores=True,
-                score_column="gradient_x_input_scores_json",
-            )
-        )
-
-        smoothgrad_ig_scores = compute_smoothgrad_ig_scores(
-            ig_model,
-            tokenizer,
-            sequence,
-            ig_probe_device,
-            steps=ig_steps,
-            n_samples=smoothgrad_ig_samples,
-            noise_std=smoothgrad_ig_noise_std,
-            internal_batch_size=ig_internal_batch_size,
-        )
-        probe_rows.extend(
-            build_probe_rows_with_label_scrambling(
-                base,
-                output_paths.mtl_family_label,
-                "smoothgrad_ig",
-                epitope_labels,
-                smoothgrad_ig_scores,
-                rng,
-                serialize_scores=True,
-                score_column="smoothgrad_ig_scores_json",
-            )
-        )
-
-        occlusion_scores = normalize_scores(
-            compute_occlusion_scores_mtl(ig_model, tokenizer, sequence, ig_probe_device)
-        )
-        probe_rows.extend(
-            build_probe_rows_with_label_scrambling(
-                base,
-                output_paths.mtl_family_label,
-                "occlusion",
-                epitope_labels,
-                occlusion_scores,
-                rng,
-                serialize_scores=True,
-                score_column="occlusion_scores_json",
-            )
-        )
-
-        if not use_precomputed_baseline:
-            baseline_ig_scores = compute_integrated_gradients(
-                baseline_ig_model,
+        ig_scores = None
+        if "integrated_gradients" in missing_mtl_methods:
+            ig_scores = compute_integrated_gradients(
+                ig_model,
                 tokenizer,
                 sequence,
                 ig_probe_device,
@@ -1435,40 +1411,44 @@ def run_probe_suite(
                 normalize=False,
                 internal_batch_size=ig_internal_batch_size,
             )
-            baseline_probe_rows.extend(
+            probe_rows.extend(
                 build_probe_rows_with_label_scrambling(
                     base,
-                    output_paths.baseline_family_label,
+                    output_paths.mtl_family_label,
                     "integrated_gradients",
                     epitope_labels,
-                    baseline_ig_scores,
+                    ig_scores,
                     rng,
                     serialize_scores=True,
                     score_column="ig_scores_json",
                 )
             )
 
-            baseline_gradient_x_input_scores = compute_gradient_x_input_scores(
-                baseline_ig_model,
+        gradient_x_input_scores = None
+        if "gradient_x_input" in missing_mtl_methods:
+            gradient_x_input_scores = compute_gradient_x_input_scores(
+                ig_model,
                 tokenizer,
                 sequence,
                 ig_probe_device,
             )
-            baseline_probe_rows.extend(
+            probe_rows.extend(
                 build_probe_rows_with_label_scrambling(
                     base,
-                    output_paths.baseline_family_label,
+                    output_paths.mtl_family_label,
                     "gradient_x_input",
                     epitope_labels,
-                    baseline_gradient_x_input_scores,
+                    gradient_x_input_scores,
                     rng,
                     serialize_scores=True,
                     score_column="gradient_x_input_scores_json",
                 )
             )
 
-            baseline_smoothgrad_ig_scores = compute_smoothgrad_ig_scores(
-                baseline_ig_model,
+        smoothgrad_ig_scores = None
+        if "smoothgrad_ig" in missing_mtl_methods:
+            smoothgrad_ig_scores = compute_smoothgrad_ig_scores(
+                ig_model,
                 tokenizer,
                 sequence,
                 ig_probe_device,
@@ -1477,75 +1457,174 @@ def run_probe_suite(
                 noise_std=smoothgrad_ig_noise_std,
                 internal_batch_size=ig_internal_batch_size,
             )
-            baseline_probe_rows.extend(
+            probe_rows.extend(
                 build_probe_rows_with_label_scrambling(
                     base,
-                    output_paths.baseline_family_label,
+                    output_paths.mtl_family_label,
                     "smoothgrad_ig",
                     epitope_labels,
-                    baseline_smoothgrad_ig_scores,
+                    smoothgrad_ig_scores,
                     rng,
                     serialize_scores=True,
                     score_column="smoothgrad_ig_scores_json",
                 )
             )
 
-            baseline_occlusion_scores = normalize_scores(
-                compute_occlusion_scores_mtl(baseline_ig_model, tokenizer, sequence, ig_probe_device)
+        occlusion_scores = None
+        if "occlusion" in missing_mtl_methods:
+            occlusion_scores = normalize_scores(
+                compute_occlusion_scores_mtl(ig_model, tokenizer, sequence, ig_probe_device)
             )
-            baseline_probe_rows.extend(
+            probe_rows.extend(
                 build_probe_rows_with_label_scrambling(
                     base,
-                    output_paths.baseline_family_label,
+                    output_paths.mtl_family_label,
                     "occlusion",
                     epitope_labels,
-                    baseline_occlusion_scores,
+                    occlusion_scores,
                     rng,
                     serialize_scores=True,
                     score_column="occlusion_scores_json",
                 )
             )
+
+        if not use_precomputed_baseline:
+            baseline_ig_scores = None
+            if "integrated_gradients" in missing_baseline_methods:
+                baseline_ig_scores = compute_integrated_gradients(
+                    baseline_ig_model,
+                    tokenizer,
+                    sequence,
+                    ig_probe_device,
+                    steps=ig_steps,
+                    normalize=False,
+                    internal_batch_size=ig_internal_batch_size,
+                )
+                baseline_probe_rows.extend(
+                    build_probe_rows_with_label_scrambling(
+                        base,
+                        output_paths.baseline_family_label,
+                        "integrated_gradients",
+                        epitope_labels,
+                        baseline_ig_scores,
+                        rng,
+                        serialize_scores=True,
+                        score_column="ig_scores_json",
+                    )
+                )
+
+            baseline_gradient_x_input_scores = None
+            if "gradient_x_input" in missing_baseline_methods:
+                baseline_gradient_x_input_scores = compute_gradient_x_input_scores(
+                    baseline_ig_model,
+                    tokenizer,
+                    sequence,
+                    ig_probe_device,
+                )
+                baseline_probe_rows.extend(
+                    build_probe_rows_with_label_scrambling(
+                        base,
+                        output_paths.baseline_family_label,
+                        "gradient_x_input",
+                        epitope_labels,
+                        baseline_gradient_x_input_scores,
+                        rng,
+                        serialize_scores=True,
+                        score_column="gradient_x_input_scores_json",
+                    )
+                )
+
+            baseline_smoothgrad_ig_scores = None
+            if "smoothgrad_ig" in missing_baseline_methods:
+                baseline_smoothgrad_ig_scores = compute_smoothgrad_ig_scores(
+                    baseline_ig_model,
+                    tokenizer,
+                    sequence,
+                    ig_probe_device,
+                    steps=ig_steps,
+                    n_samples=smoothgrad_ig_samples,
+                    noise_std=smoothgrad_ig_noise_std,
+                    internal_batch_size=ig_internal_batch_size,
+                )
+                baseline_probe_rows.extend(
+                    build_probe_rows_with_label_scrambling(
+                        base,
+                        output_paths.baseline_family_label,
+                        "smoothgrad_ig",
+                        epitope_labels,
+                        baseline_smoothgrad_ig_scores,
+                        rng,
+                        serialize_scores=True,
+                        score_column="smoothgrad_ig_scores_json",
+                    )
+                )
+
+            baseline_occlusion_scores = None
+            if "occlusion" in missing_baseline_methods:
+                baseline_occlusion_scores = normalize_scores(
+                    compute_occlusion_scores_mtl(baseline_ig_model, tokenizer, sequence, ig_probe_device)
+                )
+                baseline_probe_rows.extend(
+                    build_probe_rows_with_label_scrambling(
+                        base,
+                        output_paths.baseline_family_label,
+                        "occlusion",
+                        epitope_labels,
+                        baseline_occlusion_scores,
+                        rng,
+                        serialize_scores=True,
+                        score_column="occlusion_scores_json",
+                    )
+                )
         else:
             baseline_ig_scores = None
             baseline_gradient_x_input_scores = None
             baseline_smoothgrad_ig_scores = None
             baseline_occlusion_scores = None
 
-        random_score_draws = [
-            rng.uniform(0.0, 1.0, size=len(epitope_labels))
-            for _ in range(n_random_draws)
-        ]
-        random_metrics = [
-            compute_probe_metrics(epitope_labels, random_scores)
-            for random_scores in random_score_draws
-        ]
-        random_scrambled_metrics = [
-            compute_probe_metrics(scramble_labels(epitope_labels, rng), random_scores)
-            for random_scores in random_score_draws
-        ]
-        random_summary = mean_metric_dicts(random_metrics)
-        random_scrambled_summary = mean_metric_dicts(random_scrambled_metrics)
-        validate_probe_metrics(epitope_labels, random_summary)
-        validate_probe_metrics(epitope_labels, random_scrambled_summary)
-        probe_rows.append(
-            {
-                **base,
-                "model_family": output_paths.mtl_family_label,
-                "method": "random_mean",
-                "label_variant": "original",
-                **random_summary,
-            }
-        )
-        probe_rows.append(
-            {
-                **base,
-                "model_family": output_paths.mtl_family_label,
-                "method": "random_mean",
-                "label_variant": "scrambled",
-                **random_scrambled_summary,
-            }
-        )
-        if not use_precomputed_baseline:
+        random_score_draws = None
+        random_metrics = None
+        random_scrambled_metrics = None
+        random_summary = None
+        random_scrambled_summary = None
+        if "random_mean" in missing_mtl_methods or (not use_precomputed_baseline and "random_mean" in missing_baseline_methods):
+            random_score_draws = [
+                rng.uniform(0.0, 1.0, size=len(epitope_labels))
+                for _ in range(n_random_draws)
+            ]
+            random_metrics = [
+                compute_probe_metrics(epitope_labels, random_scores)
+                for random_scores in random_score_draws
+            ]
+            random_scrambled_metrics = [
+                compute_probe_metrics(scramble_labels(epitope_labels, rng), random_scores)
+                for random_scores in random_score_draws
+            ]
+            random_summary = mean_metric_dicts(random_metrics)
+            random_scrambled_summary = mean_metric_dicts(random_scrambled_metrics)
+            validate_probe_metrics(epitope_labels, random_summary)
+            validate_probe_metrics(epitope_labels, random_scrambled_summary)
+
+        if "random_mean" in missing_mtl_methods:
+            probe_rows.append(
+                {
+                    **base,
+                    "model_family": output_paths.mtl_family_label,
+                    "method": "random_mean",
+                    "label_variant": "original",
+                    **random_summary,
+                }
+            )
+            probe_rows.append(
+                {
+                    **base,
+                    "model_family": output_paths.mtl_family_label,
+                    "method": "random_mean",
+                    "label_variant": "scrambled",
+                    **random_scrambled_summary,
+                }
+            )
+        if not use_precomputed_baseline and "random_mean" in missing_baseline_methods:
             baseline_probe_rows.append(
                 {
                     **base,
@@ -1591,6 +1670,18 @@ def run_probe_suite(
         if save_every > 0 and processed_since_save >= save_every:
             probe_df = ensure_label_variant_column(pd.DataFrame(probe_rows))
             baseline_probe_df = ensure_label_variant_column(pd.DataFrame(baseline_probe_rows))
+            if not existing_probe_df.empty:
+                preserved_probe_df = existing_probe_df.loc[
+                    ~existing_probe_df["method"].astype(str).isin(missing_mtl_methods)
+                ].copy()
+                probe_df = ensure_label_variant_column(pd.concat([preserved_probe_df, probe_df], ignore_index=True))
+            if not existing_baseline_probe_df.empty:
+                preserved_baseline_df = existing_baseline_probe_df.loc[
+                    ~existing_baseline_probe_df["method"].astype(str).isin(missing_baseline_methods)
+                ].copy()
+                baseline_probe_df = ensure_label_variant_column(
+                    pd.concat([preserved_baseline_df, baseline_probe_df], ignore_index=True)
+                )
             combined_probe_df = ensure_label_variant_column(pd.concat([baseline_probe_df, probe_df], ignore_index=True))
             validate_unique_probe_rows(probe_df)
             validate_unique_probe_rows(baseline_probe_df)
@@ -1599,6 +1690,9 @@ def run_probe_suite(
             baseline_probe_df.to_csv(output_paths.baseline_probe_rows_path, index=False)
             combined_probe_df.to_csv(output_paths.combined_probe_rows_path, index=False)
             processed_since_save = 0
+
+        if progress_print_every > 0 and (idx % progress_print_every == 0 or idx == total_rows):
+            print(f"{progress_desc}: processed {idx}/{total_rows} proteins")
 
     del ig_model
     if baseline_ig_model is not None:
@@ -1611,6 +1705,18 @@ def run_probe_suite(
 
     probe_df = ensure_label_variant_column(pd.DataFrame(probe_rows))
     baseline_probe_df = ensure_label_variant_column(pd.DataFrame(baseline_probe_rows))
+    if not existing_probe_df.empty:
+        preserved_probe_df = existing_probe_df.loc[
+            ~existing_probe_df["method"].astype(str).isin(missing_mtl_methods)
+        ].copy()
+        probe_df = ensure_label_variant_column(pd.concat([preserved_probe_df, probe_df], ignore_index=True))
+    if not existing_baseline_probe_df.empty:
+        preserved_baseline_df = existing_baseline_probe_df.loc[
+            ~existing_baseline_probe_df["method"].astype(str).isin(missing_baseline_methods)
+        ].copy()
+        baseline_probe_df = ensure_label_variant_column(
+            pd.concat([preserved_baseline_df, baseline_probe_df], ignore_index=True)
+        )
     combined_probe_df = ensure_label_variant_column(pd.concat([baseline_probe_df, probe_df], ignore_index=True))
     validate_unique_probe_rows(probe_df)
     validate_unique_probe_rows(baseline_probe_df)

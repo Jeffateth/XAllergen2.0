@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import random
@@ -93,6 +94,12 @@ def print_runtime_context(device: str, project_root: Path) -> None:
     else:
         print("GPU configuration:")
         print("  No MPS accelerator detected. Running on CPU.")
+
+
+def cudnn_backward_safe_context(device: str):
+    if str(device).startswith("cuda"):
+        return torch.backends.cudnn.flags(enabled=False)
+    return contextlib.nullcontext()
 
 
 def build_tokenizer(model_name: str = HF_MODEL_NAME):
@@ -561,12 +568,13 @@ def compute_integrated_gradients(
     def ig_forward(inputs_embeds: torch.Tensor) -> torch.Tensor:
         return model.forward_from_inputs_embeds(inputs_embeds, attention_mask)["logits"]
 
-    attributions = IntegratedGradients(ig_forward).attribute(
-        inputs=input_embeds,
-        baselines=baseline,
-        n_steps=steps,
-        internal_batch_size=internal_batch_size,
-    )
+    with cudnn_backward_safe_context(device):
+        attributions = IntegratedGradients(ig_forward).attribute(
+            inputs=input_embeds,
+            baselines=baseline,
+            n_steps=steps,
+            internal_batch_size=internal_batch_size,
+        )
     importance = attributions.abs().sum(dim=-1).squeeze(0).detach().cpu().numpy()
     valid_length = int(attention_mask.sum().item())
     importance = importance[:valid_length]
@@ -591,14 +599,15 @@ def compute_gradient_x_input_scores(
     input_embeds = model.backbone.get_input_embeddings()(encodings["input_ids"]).detach()
     input_embeds.requires_grad_(True)
 
-    logits = model.forward_from_inputs_embeds(input_embeds, attention_mask)["logits"]
-    gradients = torch.autograd.grad(
-        outputs=logits.sum(),
-        inputs=input_embeds,
-        retain_graph=False,
-        create_graph=False,
-        only_inputs=True,
-    )[0]
+    with cudnn_backward_safe_context(device):
+        logits = model.forward_from_inputs_embeds(input_embeds, attention_mask)["logits"]
+        gradients = torch.autograd.grad(
+            outputs=logits.sum(),
+            inputs=input_embeds,
+            retain_graph=False,
+            create_graph=False,
+            only_inputs=True,
+        )[0]
 
     scores = (input_embeds * gradients).sum(dim=-1).abs().squeeze(0)
     valid_length = int(attention_mask.sum().item())
@@ -646,12 +655,13 @@ def compute_smoothgrad_ig_scores(
             noisy_embeds = base_embeds + torch.randn_like(base_embeds) * noise_scale
         else:
             noisy_embeds = base_embeds
-        attributions = ig.attribute(
-            inputs=noisy_embeds.detach(),
-            baselines=baseline,
-            n_steps=steps,
-            internal_batch_size=internal_batch_size,
-        )
+        with cudnn_backward_safe_context(device):
+            attributions = ig.attribute(
+                inputs=noisy_embeds.detach(),
+                baselines=baseline,
+                n_steps=steps,
+                internal_batch_size=internal_batch_size,
+            )
         scores = attributions.abs().sum(dim=-1).squeeze(0).detach().cpu().numpy()
         total_scores += scores[: total_scores.shape[0]]
 
@@ -723,13 +733,25 @@ def run_baseline_probe_suite(
     smoothgrad_ig_samples: int = 10,
     smoothgrad_ig_noise_std: float = 0.05,
     include_shuffled_mean: bool = False,
+    progress_label: str | None = None,
+    enabled_methods: set[str] | None = None,
+    progress_print_every: int = 5,
 ) -> pd.DataFrame:
     from .mtl_epitope_notebook_utils import compute_occlusion_scores_mtl
 
     rng = np.random.default_rng(RANDOM_STATE)
     results_rows = []
+    enabled_methods = None if enabled_methods is None else set(enabled_methods)
 
-    for _, row in tqdm(eval_df.iterrows(), total=len(eval_df), desc="Evaluating proteins"):
+    def method_enabled(method: str) -> bool:
+        return enabled_methods is None or method in enabled_methods
+
+    progress_desc = progress_label or "Evaluating proteins"
+    total_rows = len(eval_df)
+    for idx, (_, row) in enumerate(
+        tqdm(eval_df.iterrows(), total=total_rows, desc=progress_desc),
+        start=1,
+    ):
         sequence = row["sequence"]
         epitope_labels = row["epitope_label"]
         accession = row["accession"]
@@ -747,101 +769,107 @@ def run_baseline_probe_suite(
         }
 
         attn_scores = None
-        try:
-            attn_scores = compute_attention_weights(model, tokenizer, sequence, device)
-            results_rows.append(
-                {**base, "method": "attention_weights", **compute_probe_metrics(epitope_labels, attn_scores)}
-            )
-        except Exception as exc:
-            print(f"[attention] {accession}: {exc}")
+        if method_enabled("attention_weights"):
+            try:
+                attn_scores = compute_attention_weights(model, tokenizer, sequence, device)
+                results_rows.append(
+                    {**base, "method": "attention_weights", **compute_probe_metrics(epitope_labels, attn_scores)}
+                )
+            except Exception as exc:
+                print(f"[attention] {accession}: {exc}")
 
-        try:
-            ig_scores = compute_integrated_gradients(
-                model,
-                tokenizer,
-                sequence,
-                device,
-                steps=ig_steps,
-                normalize=False,
-                internal_batch_size=ig_internal_batch_size,
-            )
+        if method_enabled("integrated_gradients"):
+            try:
+                ig_scores = compute_integrated_gradients(
+                    model,
+                    tokenizer,
+                    sequence,
+                    device,
+                    steps=ig_steps,
+                    normalize=False,
+                    internal_batch_size=ig_internal_batch_size,
+                )
+                results_rows.append(
+                    {
+                        **base,
+                        "method": "integrated_gradients",
+                        "ig_scores_json": serialize_score_array(ig_scores),
+                        **compute_probe_metrics(epitope_labels, ig_scores),
+                    }
+                )
+            except Exception as exc:
+                print(f"[IG] {accession}: {exc}")
+
+        if method_enabled("gradient_x_input"):
+            try:
+                gradient_x_input_scores = compute_gradient_x_input_scores(
+                    model,
+                    tokenizer,
+                    sequence,
+                    device,
+                )
+                results_rows.append(
+                    {
+                        **base,
+                        "method": "gradient_x_input",
+                        "gradient_x_input_scores_json": serialize_score_array(gradient_x_input_scores),
+                        **compute_probe_metrics(epitope_labels, gradient_x_input_scores),
+                    }
+                )
+            except Exception as exc:
+                print(f"[Grad x Input] {accession}: {exc}")
+
+        if method_enabled("smoothgrad_ig"):
+            try:
+                smoothgrad_ig_scores = compute_smoothgrad_ig_scores(
+                    model,
+                    tokenizer,
+                    sequence,
+                    device,
+                    steps=ig_steps,
+                    n_samples=smoothgrad_ig_samples,
+                    noise_std=smoothgrad_ig_noise_std,
+                    internal_batch_size=ig_internal_batch_size if ig_internal_batch_size is not None else 1,
+                )
+                results_rows.append(
+                    {
+                        **base,
+                        "method": "smoothgrad_ig",
+                        "smoothgrad_ig_scores_json": serialize_score_array(smoothgrad_ig_scores),
+                        **compute_probe_metrics(epitope_labels, smoothgrad_ig_scores),
+                    }
+                )
+            except Exception as exc:
+                print(f"[SmoothGrad-IG] {accession}: {exc}")
+
+        if method_enabled("occlusion"):
+            try:
+                occlusion_scores = normalize_scores(
+                    compute_occlusion_scores_mtl(model, tokenizer, sequence, device)
+                )
+                results_rows.append(
+                    {
+                        **base,
+                        "method": "occlusion",
+                        "occlusion_scores_json": serialize_score_array(occlusion_scores),
+                        **compute_probe_metrics(epitope_labels, occlusion_scores),
+                    }
+                )
+            except Exception as exc:
+                print(f"[Occlusion] {accession}: {exc}")
+
+        if method_enabled("random_mean"):
+            rand_metrics = [
+                compute_probe_metrics(epitope_labels, rng.uniform(0.0, 1.0, size=seq_len))
+                for _ in range(n_random_draws)
+            ]
             results_rows.append(
                 {
                     **base,
-                    "method": "integrated_gradients",
-                    "ig_scores_json": serialize_score_array(ig_scores),
-                    **compute_probe_metrics(epitope_labels, ig_scores),
+                    "method": "random_mean",
+                    **mean_metric_dicts(rand_metrics),
                 }
             )
-        except Exception as exc:
-            print(f"[IG] {accession}: {exc}")
-
-        try:
-            gradient_x_input_scores = compute_gradient_x_input_scores(
-                model,
-                tokenizer,
-                sequence,
-                device,
-            )
-            results_rows.append(
-                {
-                    **base,
-                    "method": "gradient_x_input",
-                    "gradient_x_input_scores_json": serialize_score_array(gradient_x_input_scores),
-                    **compute_probe_metrics(epitope_labels, gradient_x_input_scores),
-                }
-            )
-        except Exception as exc:
-            print(f"[Grad x Input] {accession}: {exc}")
-
-        try:
-            smoothgrad_ig_scores = compute_smoothgrad_ig_scores(
-                model,
-                tokenizer,
-                sequence,
-                device,
-                steps=ig_steps,
-                n_samples=smoothgrad_ig_samples,
-                noise_std=smoothgrad_ig_noise_std,
-                internal_batch_size=ig_internal_batch_size if ig_internal_batch_size is not None else 1,
-            )
-            results_rows.append(
-                {
-                    **base,
-                    "method": "smoothgrad_ig",
-                    "smoothgrad_ig_scores_json": serialize_score_array(smoothgrad_ig_scores),
-                    **compute_probe_metrics(epitope_labels, smoothgrad_ig_scores),
-                }
-            )
-        except Exception as exc:
-            print(f"[SmoothGrad-IG] {accession}: {exc}")
-
-        try:
-            occlusion_scores = normalize_scores(
-                compute_occlusion_scores_mtl(model, tokenizer, sequence, device)
-            )
-            results_rows.append(
-                {
-                    **base,
-                    "method": "occlusion",
-                    "occlusion_scores_json": serialize_score_array(occlusion_scores),
-                    **compute_probe_metrics(epitope_labels, occlusion_scores),
-                }
-            )
-        except Exception as exc:
-            print(f"[Occlusion] {accession}: {exc}")
-
-        rand_metrics = [
-            compute_probe_metrics(epitope_labels, rng.uniform(0.0, 1.0, size=seq_len))
-            for _ in range(n_random_draws)
-        ]
-        results_rows.append(
-            {
-                **base,
-                "method": "random_mean",
-                **mean_metric_dicts(rand_metrics),
-            }
-        )
 
         if include_shuffled_mean and attn_scores is not None:
             try:
@@ -858,6 +886,9 @@ def run_baseline_probe_suite(
                 )
             except Exception as exc:
                 print(f"[shuffled] {accession}: {exc}")
+
+        if progress_print_every > 0 and (idx % progress_print_every == 0 or idx == total_rows):
+            print(f"{progress_desc}: processed {idx}/{total_rows} proteins")
 
     return pd.DataFrame(results_rows)
 
