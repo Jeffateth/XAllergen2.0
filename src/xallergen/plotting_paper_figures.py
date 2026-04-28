@@ -304,17 +304,21 @@ def write_main_protein_performance_table(
 ) -> pd.DataFrame:
     ordered_models = ["Frozen ESM-2", "MTL ESM-2", "DeepPlantAllergy"]
     if metrics_df.empty:
-        table_df = pd.DataFrame(columns=["Model", "AUROC", "AUPRC", "MCC", "Accuracy", "n_test_sequences"])
+        table_df = pd.DataFrame(
+            columns=["Model", "AUROC", "Precision", "Recall", "F1", "MCC", "Accuracy", "n_test_sequences"]
+        )
         _write_table_outputs(table_df, csv_path, tex_path)
         return table_df
 
     metrics_df = metrics_df.copy()
     metrics_df["_order"] = metrics_df["Model"].map({label: idx for idx, label in enumerate(ordered_models)})
     metrics_df = metrics_df.sort_values("_order").drop(columns="_order")
-    for column in ["AUROC", "AUPRC", "MCC", "Accuracy"]:
+    for column in ["AUROC", "Precision", "Recall", "F1", "MCC", "Accuracy"]:
         if column in metrics_df.columns:
             metrics_df[column] = metrics_df[column].map(lambda value: f"{value:.3f}" if pd.notna(value) else "NA")
-    table_df = metrics_df[["Model", "AUROC", "AUPRC", "MCC", "Accuracy", "n_test_sequences"]].copy()
+    table_df = metrics_df[
+        ["Model", "AUROC", "Precision", "Recall", "F1", "MCC", "Accuracy", "n_test_sequences"]
+    ].copy()
     _write_table_outputs(table_df, csv_path, tex_path)
     return table_df
 

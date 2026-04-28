@@ -2149,7 +2149,9 @@ def load_protein_level_metrics(
                 n_test_sequences = sum(int(payload[key]) for key in confusion_keys)
             return {
                 "auroc": payload.get("ROC-AUC"),
-                "auprc": payload.get("AUPRC"),
+                "precision": payload.get("Precision"),
+                "recall": payload.get("Recall"),
+                "f1": payload.get("F1 Score"),
                 "mcc": payload.get("MCC"),
                 "accuracy": payload.get("Accuracy"),
                 "n_test_sequences": n_test_sequences,
@@ -2184,7 +2186,9 @@ def load_protein_level_metrics(
                 "family_key": spec["family_key"],
                 "Model": spec["display_label"],
                 "AUROC": test_metrics.get("auroc"),
-                "AUPRC": test_metrics.get("auprc"),
+                "Precision": test_metrics.get("precision"),
+                "Recall": test_metrics.get("recall"),
+                "F1": test_metrics.get("f1"),
                 "MCC": test_metrics.get("mcc"),
                 "Accuracy": test_metrics.get("accuracy"),
                 "n_test_sequences": test_metrics.get("n_test_sequences"),
