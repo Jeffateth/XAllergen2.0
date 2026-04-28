@@ -62,7 +62,7 @@ class MTLOutputPaths:
     metrics_path: Path
     probe_rows_path: Path
     baseline_probe_rows_path: Path
-    combined_probe_rows_path: Path
+    combined_probe_rows_path: Path | None
     probe_summary_path: Path
     compare_summary_path: Path
     combined_violins_png: Path
@@ -1340,7 +1340,6 @@ def run_probe_suite(
     for output_path in [
         output_paths.probe_rows_path,
         output_paths.baseline_probe_rows_path,
-        output_paths.combined_probe_rows_path,
     ]:
         ensure_output_parent(output_path)
 
@@ -1688,7 +1687,6 @@ def run_probe_suite(
             validate_unique_probe_rows(combined_probe_df)
             probe_df.to_csv(output_paths.probe_rows_path, index=False)
             baseline_probe_df.to_csv(output_paths.baseline_probe_rows_path, index=False)
-            combined_probe_df.to_csv(output_paths.combined_probe_rows_path, index=False)
             processed_since_save = 0
 
         if progress_print_every > 0 and (idx % progress_print_every == 0 or idx == total_rows):
@@ -1724,10 +1722,8 @@ def run_probe_suite(
 
     probe_df.to_csv(output_paths.probe_rows_path, index=False)
     baseline_probe_df.to_csv(output_paths.baseline_probe_rows_path, index=False)
-    combined_probe_df.to_csv(output_paths.combined_probe_rows_path, index=False)
     print(f"Saved MTL row-wise probe metrics to: {output_paths.probe_rows_path}")
     print(f"Saved baseline row-wise probe metrics to: {output_paths.baseline_probe_rows_path}")
-    print(f"Saved combined row-wise probe metrics to: {output_paths.combined_probe_rows_path}")
 
     return {
         "probe_df": probe_df,
@@ -1883,20 +1879,15 @@ def save_localization_summary_csvs(
     original_df = original_label_rows(combined_probe_df)
     main_summary_df = summarize_probe_methods(original_df, MAIN_LOCALIZATION_METHODS)
     supplementary_summary_df = summarize_probe_methods(original_df, SUPPLEMENTARY_SIGNAL_METHODS)
-    scrambling_summary_df = summarize_probe_methods(combined_probe_df, SUPPLEMENTARY_SIGNAL_METHODS)
     main_summary_path = output_dir / "main_localization_summary.csv"
     supplementary_summary_path = output_dir / "supplementary_all_signals_summary.csv"
-    scrambling_summary_path = output_dir / "probe_summary_with_scrambling.csv"
     main_summary_df.to_csv(main_summary_path, index=False)
     supplementary_summary_df.to_csv(supplementary_summary_path, index=False)
-    scrambling_summary_df.to_csv(scrambling_summary_path, index=False)
     print(f"Saved main localization summary to: {main_summary_path}")
     print(f"Saved supplementary all-signals summary to: {supplementary_summary_path}")
-    print(f"Saved label-scrambling summary to: {scrambling_summary_path}")
     return {
         "main_summary_df": main_summary_df,
         "supplementary_summary_df": supplementary_summary_df,
-        "scrambling_summary_df": scrambling_summary_df,
     }
 
 
@@ -1975,32 +1966,6 @@ def get_supported_probe_model_registry(
             "supplementary_only": False,
         },
     ]
-    if include_supplementary:
-        registry.append(
-            {
-                "family_key": "mtl_top1_unfrozen",
-                "display_label": "MTL ESM-2 top-1",
-                "checkpoint_name": "mtl_top1_unfrozen_esm2_epitope.pt",
-                "model_kind": "mtl",
-                "probe_rows_path": probe_rows_dir(results_dir) / "mtl_top1_unfrozen_probing_rows.csv",
-                "summary_path": probe_summaries_dir(results_dir) / "mtl_top1_unfrozen_probing_summary.csv",
-                "supported_methods": (
-                    "residue_head",
-                    "attention_weights",
-                    "integrated_gradients",
-                    "gradient_x_input",
-                    "smoothgrad_ig",
-                    "occlusion",
-                    "random_mean",
-                ),
-                "metrics_candidates": (
-                    Path(results_dir) / "mtl_top1_unfrozen_baseline_metrics.json",
-                    classification_results_dir(results_dir) / "mtl_top1_unfrozen_baseline_metrics.json",
-                ),
-                "supplementary_only": True,
-            }
-        )
-
     materialized = []
     for spec in registry:
         checkpoint_path = Path(models_dir) / spec["checkpoint_name"]

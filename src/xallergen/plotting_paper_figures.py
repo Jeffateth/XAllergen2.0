@@ -73,32 +73,16 @@ def build_output_paths_for_supported_mtl(
     baseline_checkpoint_path: Path,
     baseline_summary_path: Path,
 ) -> MTLOutputPaths:
-    if family_key == "mtl_frozen":
-        prefix = "mtl"
-        checkpoint_name = "mtl_frozen_esm2_epitope.pt"
-        metrics_name = "mtl_baseline_metrics.json"
-        baseline_rows_name = "baseline_probing_rows.csv"
-    elif family_key == "mtl_top1_unfrozen":
-        prefix = "mtl_top1_unfrozen"
-        checkpoint_name = "mtl_top1_unfrozen_esm2_epitope.pt"
-        metrics_name = "mtl_top1_unfrozen_baseline_metrics.json"
-        baseline_rows_name = "baseline_probing_rows_top1_unfrozen.csv"
-    else:
+    if family_key != "mtl_frozen":
         raise ValueError(f"Unsupported MTL family_key for output path construction: {family_key}")
-
-    if family_key == "mtl_frozen":
-        probe_rows_name = "mtl_probing_rows.csv"
-        probe_summary_name = "mtl_probing_summary.csv"
-        combined_rows_name = "mtl_vs_baseline_probing_rows.csv"
-        compare_summary_name = "mtl_vs_baseline_summary.csv"
-        figure_prefix = "mtl_vs_baseline"
-    else:
-        suffix = family_key.replace("mtl_", "", 1)
-        probe_rows_name = f"mtl_{suffix}_probing_rows.csv"
-        probe_summary_name = f"mtl_{suffix}_probing_summary.csv"
-        combined_rows_name = f"mtl_{suffix}_vs_baseline_probing_rows.csv"
-        compare_summary_name = f"mtl_{suffix}_vs_baseline_summary.csv"
-        figure_prefix = f"mtl_{suffix}_vs_baseline"
+    prefix = "mtl"
+    checkpoint_name = "mtl_frozen_esm2_epitope.pt"
+    metrics_name = "mtl_baseline_metrics.json"
+    baseline_rows_name = "baseline_probing_rows.csv"
+    probe_rows_name = "mtl_probing_rows.csv"
+    probe_summary_name = "mtl_probing_summary.csv"
+    compare_summary_name = "mtl_vs_baseline_summary.csv"
+    figure_prefix = "mtl_vs_baseline"
 
     return MTLOutputPaths(
         baseline_checkpoint_path=baseline_checkpoint_path,
@@ -106,7 +90,7 @@ def build_output_paths_for_supported_mtl(
         metrics_path=results_dir / "classification" / metrics_name,
         probe_rows_path=results_dir / "probing" / "rows" / probe_rows_name,
         baseline_probe_rows_path=results_dir / "probing" / "rows" / baseline_rows_name,
-        combined_probe_rows_path=results_dir / "probing" / "rows" / combined_rows_name,
+        combined_probe_rows_path=None,
         probe_summary_path=results_dir / "probing" / "summaries" / probe_summary_name,
         compare_summary_path=results_dir / "probing" / "summaries" / compare_summary_name,
         combined_violins_png=results_dir / "figures" / "diagnostics" / f"{figure_prefix}_probing_violins.png",
