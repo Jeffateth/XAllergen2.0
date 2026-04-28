@@ -2031,6 +2031,7 @@ def get_supported_probe_model_registry(
                 "integrated_gradients",
                 "gradient_x_input",
                 "smoothgrad_ig",
+                "occlusion",
                 "random_mean",
             ),
             "metrics_candidates": (

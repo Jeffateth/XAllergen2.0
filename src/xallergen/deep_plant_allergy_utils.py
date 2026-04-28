@@ -473,6 +473,41 @@ def compute_smoothgrad_ig_scores(
     return (total_scores / n_samples).astype(np.float32)
 
 
+def compute_occlusion_scores(
+    model,
+    embedding_model,
+    tokenizer,
+    sequence: str,
+    device: str,
+) -> np.ndarray:
+    """
+    Single-residue occlusion for DeepPlantAllergy.
+    Replaces residue i with the tokenizer's mask token, then records the
+    drop in predicted allergenicity probability.
+    """
+    if tokenizer.mask_token is None:
+        raise ValueError("Tokenizer has no mask token; cannot compute occlusion scores.")
+
+    model.eval()
+
+    def _forward(seq: str) -> float:
+        residue_embeddings = compute_residue_embeddings(embedding_model, tokenizer, seq, device)
+        with torch.no_grad():
+            logits = model(residue_embeddings)
+        return float(torch.sigmoid(logits).item())
+
+    p_base = _forward(sequence)
+    residues = list(clean_protein_sequence(sequence))
+    delta_p = np.zeros(len(residues), dtype=np.float32)
+
+    for idx in range(len(residues)):
+        masked = residues.copy()
+        masked[idx] = tokenizer.mask_token
+        delta_p[idx] = p_base - _forward("".join(masked))
+
+    return delta_p
+
+
 def mean_metric_dicts(metric_rows: list[dict]) -> dict:
     return {
         "auroc": float(np.nanmean([row["auroc"] for row in metric_rows])),
@@ -602,6 +637,28 @@ def run_deep_plant_probe_suite(
                 )
             except Exception as exc:
                 print(f"[SmoothGrad-IG] {accession}: {exc}")
+
+        if method_enabled("occlusion"):
+            try:
+                occlusion_scores = normalize_scores(
+                    compute_occlusion_scores(
+                        model,
+                        embedding_model,
+                        tokenizer,
+                        sequence,
+                        device,
+                    )
+                )
+                results_rows.append(
+                    {
+                        **base,
+                        "method": "occlusion",
+                        "occlusion_scores_json": serialize_score_array(occlusion_scores),
+                        **compute_probe_metrics(epitope_labels, occlusion_scores),
+                    }
+                )
+            except Exception as exc:
+                print(f"[Occlusion] {accession}: {exc}")
 
         if method_enabled("random_mean"):
             rand_metrics = [
