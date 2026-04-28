@@ -437,7 +437,7 @@ def plot_main_residue_alignment_subset(
                     continue
                 direction = "↑" if float(mean_diff) > 0 else "↓"
                 ax.text(
-                    float(mean_value) + 0.018,
+                    float(mean_value) + 0.028,
                     float(y_pos),
                     f"{direction}{marker_value}",
                     color=METRIC_COLOR_MAP[metric_key],
