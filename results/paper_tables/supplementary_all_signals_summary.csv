@@ -30,3 +30,4 @@ DeepPlantAllergy,Attention,attention_weights,Model-internal signal,original,61,0
 DeepPlantAllergy,IG,integrated_gradients,Post-hoc attribution,original,61,0.5238049741358989,"0.524 [0.480, 0.565]",0.295297854049701,"0.295 [0.236, 0.359]",0.2549399825644603,"0.255 [0.194, 0.318]",0.2194011556645071
 DeepPlantAllergy,Grad×Input,gradient_x_input,Post-hoc attribution,original,61,0.4859954799426156,"0.486 [0.470, 0.502]",0.2583088917247004,"0.258 [0.207, 0.311]",0.23148609888119426,"0.231 [0.178, 0.286]",0.2194011556645071
 DeepPlantAllergy,SmoothGrad-IG,smoothgrad_ig,Post-hoc attribution,original,61,0.519544454707264,"0.520 [0.477, 0.560]",0.2957798795553506,"0.296 [0.235, 0.359]",0.2578755327334108,"0.258 [0.197, 0.320]",0.2194011556645071
+DeepPlantAllergy,Occlusion,occlusion,Perturbation sensitivity,original,61,0.48118761777997476,"0.481 [0.439, 0.525]",0.285425931583286,"0.285 [0.229, 0.341]",0.24035797658584324,"0.240 [0.186, 0.298]",0.2194011556645071

@@ -3,4 +3,5 @@ DeepPlantAllergy,attention_weights,original,Model-internal signal,0.4677,0.4213,
 DeepPlantAllergy,integrated_gradients,original,Post-hoc attribution,0.5238,0.4804,0.5649,0.2953,0.2359,0.3589,0.2549,0.1935,0.3178,61
 DeepPlantAllergy,gradient_x_input,original,Post-hoc attribution,0.486,0.4698,0.5017,0.2583,0.2075,0.3106,0.2315,0.1783,0.2857,61
 DeepPlantAllergy,smoothgrad_ig,original,Post-hoc attribution,0.5195,0.4771,0.5597,0.2958,0.2354,0.3588,0.2579,0.197,0.3197,61
+DeepPlantAllergy,occlusion,original,Perturbation sensitivity,0.4812,0.4387,0.5247,0.2854,0.2289,0.3407,0.2404,0.1856,0.2978,61
 DeepPlantAllergy,random_mean,original,Null baseline,0.5003,0.4987,0.5017,0.2675,0.2175,0.3194,0.2501,0.2003,0.3023,61
