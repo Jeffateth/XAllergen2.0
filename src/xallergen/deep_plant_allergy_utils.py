@@ -371,6 +371,108 @@ def compute_integrated_gradients(
     return normalize_scores(importance) if normalize else importance
 
 
+def compute_gradient_x_input_scores(
+    model,
+    embedding_model,
+    tokenizer,
+    sequence: str,
+    device: str,
+) -> np.ndarray:
+    """
+    Gradient x Input attribution against the protein-level classification logit.
+    Returns one absolute embedding-dot-gradient score per residue.
+    """
+    model.eval()
+    residue_embeddings = compute_residue_embeddings(embedding_model, tokenizer, sequence, device)
+    residue_embeddings = residue_embeddings.detach()
+    residue_embeddings.requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+
+    lstm_module = getattr(model, "lstm", None)
+    lstm_training_state = None if lstm_module is None else lstm_module.training
+
+    try:
+        if lstm_module is not None:
+            lstm_module.train()
+        with cudnn_backward_safe_context(device):
+            logits = model(residue_embeddings)
+            gradients = torch.autograd.grad(
+                outputs=logits.sum(),
+                inputs=residue_embeddings,
+                retain_graph=False,
+                create_graph=False,
+                only_inputs=True,
+            )[0]
+    finally:
+        if lstm_module is not None and lstm_training_state is not None:
+            lstm_module.train(lstm_training_state)
+
+    scores = (residue_embeddings * gradients).sum(dim=-1).abs().squeeze(0)
+    model.zero_grad(set_to_none=True)
+    return scores.detach().cpu().numpy().astype(np.float32)
+
+
+def compute_smoothgrad_ig_scores(
+    model,
+    embedding_model,
+    tokenizer,
+    sequence: str,
+    device: str,
+    steps: int,
+    n_samples: int = 10,
+    noise_std: float = 0.05,
+    internal_batch_size: int = 10,
+) -> np.ndarray:
+    """
+    SmoothGrad over Integrated Gradients in residue-embedding space.
+    Noise is added to the frozen ESM embeddings before attribution.
+    """
+    from captum.attr import IntegratedGradients
+
+    if n_samples <= 0:
+        raise ValueError("n_samples must be positive for SmoothGrad-IG.")
+    if noise_std < 0:
+        raise ValueError("noise_std must be non-negative for SmoothGrad-IG.")
+
+    model.eval()
+    residue_embeddings = compute_residue_embeddings(embedding_model, tokenizer, sequence, device)
+    baseline = torch.zeros_like(residue_embeddings)
+    noise_scale = float(noise_std) * float(residue_embeddings.detach().std().item())
+    total_scores = np.zeros(residue_embeddings.shape[1], dtype=np.float64)
+
+    lstm_module = getattr(model, "lstm", None)
+    lstm_training_state = None if lstm_module is None else lstm_module.training
+
+    def ig_forward(inputs_embeds: torch.Tensor) -> torch.Tensor:
+        return model(inputs_embeds).squeeze(-1)
+
+    ig = IntegratedGradients(ig_forward)
+    try:
+        if lstm_module is not None:
+            lstm_module.train()
+        for _ in range(n_samples):
+            model.zero_grad(set_to_none=True)
+            if noise_scale > 0:
+                noisy_embeds = residue_embeddings + torch.randn_like(residue_embeddings) * noise_scale
+            else:
+                noisy_embeds = residue_embeddings
+            with cudnn_backward_safe_context(device):
+                attributions = ig.attribute(
+                    inputs=noisy_embeds.detach(),
+                    baselines=baseline,
+                    n_steps=steps,
+                    internal_batch_size=internal_batch_size,
+                )
+            scores = attributions.abs().sum(dim=-1).squeeze(0).detach().cpu().numpy()
+            total_scores += scores[: total_scores.shape[0]]
+    finally:
+        if lstm_module is not None and lstm_training_state is not None:
+            lstm_module.train(lstm_training_state)
+
+    model.zero_grad(set_to_none=True)
+    return (total_scores / n_samples).astype(np.float32)
+
+
 def mean_metric_dicts(metric_rows: list[dict]) -> dict:
     return {
         "auroc": float(np.nanmean([row["auroc"] for row in metric_rows])),
@@ -388,6 +490,9 @@ def run_deep_plant_probe_suite(
     ig_steps: int = IG_STEPS,
     n_random_draws: int = 100,
     max_seq_len: int = MAX_SEQ_LEN,
+    ig_internal_batch_size: int | None = 1,
+    smoothgrad_ig_samples: int = 10,
+    smoothgrad_ig_noise_std: float = 0.05,
     progress_label: str | None = None,
     enabled_methods: set[str] | None = None,
     progress_print_every: int = 5,
@@ -421,6 +526,7 @@ def run_deep_plant_probe_suite(
             "n_epitope_residues": row["n_epitope_residues"],
         }
 
+        attn_scores = None
         if method_enabled("attention_weights"):
             try:
                 attn_scores = compute_attention_weights(model, embedding_model, tokenizer, sequence, device)
@@ -440,6 +546,7 @@ def run_deep_plant_probe_suite(
                     device,
                     steps=ig_steps,
                     normalize=False,
+                    internal_batch_size=ig_internal_batch_size,
                 )
                 results_rows.append(
                     {
@@ -451,6 +558,50 @@ def run_deep_plant_probe_suite(
                 )
             except Exception as exc:
                 print(f"[IG] {accession}: {exc}")
+
+        if method_enabled("gradient_x_input"):
+            try:
+                gradient_x_input_scores = compute_gradient_x_input_scores(
+                    model,
+                    embedding_model,
+                    tokenizer,
+                    sequence,
+                    device,
+                )
+                results_rows.append(
+                    {
+                        **base,
+                        "method": "gradient_x_input",
+                        "gradient_x_input_scores_json": serialize_score_array(gradient_x_input_scores),
+                        **compute_probe_metrics(epitope_labels, gradient_x_input_scores),
+                    }
+                )
+            except Exception as exc:
+                print(f"[Grad x Input] {accession}: {exc}")
+
+        if method_enabled("smoothgrad_ig"):
+            try:
+                smoothgrad_ig_scores = compute_smoothgrad_ig_scores(
+                    model,
+                    embedding_model,
+                    tokenizer,
+                    sequence,
+                    device,
+                    steps=ig_steps,
+                    n_samples=smoothgrad_ig_samples,
+                    noise_std=smoothgrad_ig_noise_std,
+                    internal_batch_size=ig_internal_batch_size if ig_internal_batch_size is not None else 1,
+                )
+                results_rows.append(
+                    {
+                        **base,
+                        "method": "smoothgrad_ig",
+                        "smoothgrad_ig_scores_json": serialize_score_array(smoothgrad_ig_scores),
+                        **compute_probe_metrics(epitope_labels, smoothgrad_ig_scores),
+                    }
+                )
+            except Exception as exc:
+                print(f"[SmoothGrad-IG] {accession}: {exc}")
 
         if method_enabled("random_mean"):
             rand_metrics = [

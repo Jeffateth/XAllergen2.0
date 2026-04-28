@@ -2029,6 +2029,8 @@ def get_supported_probe_model_registry(
             "supported_methods": (
                 "attention_weights",
                 "integrated_gradients",
+                "gradient_x_input",
+                "smoothgrad_ig",
                 "random_mean",
             ),
             "metrics_candidates": (
