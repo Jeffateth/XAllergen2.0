@@ -218,6 +218,143 @@ def _format_vs_random(mean_diff: float, q_value: float) -> str:
     return f"{direction} {marker} (q={_format_q_value(q_value)})"
 
 
+def _coalesce_sequence_lengths(frame: pd.DataFrame) -> pd.Series:
+    if frame.empty:
+        return pd.Series(dtype=float)
+    if "sequence_length" in frame.columns:
+        lengths = pd.to_numeric(frame["sequence_length"], errors="coerce")
+    else:
+        lengths = pd.Series(np.nan, index=frame.index, dtype=float)
+    if "length" in frame.columns:
+        lengths = lengths.fillna(pd.to_numeric(frame["length"], errors="coerce"))
+    if "sequence" in frame.columns:
+        lengths = lengths.fillna(frame["sequence"].astype(str).str.len().astype(float))
+    return lengths.astype(float)
+
+
+def _parse_pipe_delimited_ints(value: object) -> list[int]:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return []
+    values: list[int] = []
+    for token in str(value).split("|"):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            values.append(int(token))
+        except ValueError:
+            continue
+    return values
+
+
+def _load_dataset_artifacts(data_dir: Path) -> dict[str, pd.DataFrame]:
+    paths = {
+        "positives": Path(data_dir) / "positives.csv",
+        "positive_metadata": Path(data_dir) / "positives_all_epitope_metadata.csv",
+        "positives_split_a": Path(data_dir) / "positives_splitA.csv",
+        "positives_split_b": Path(data_dir) / "positives_splitB.csv",
+        "negatives_split_a": Path(data_dir) / "negatives_splitA.csv",
+        "negatives_split_b": Path(data_dir) / "negatives_splitB.csv",
+    }
+    artifacts: dict[str, pd.DataFrame] = {}
+    for key, path in paths.items():
+        artifacts[key] = pd.read_csv(path) if path.exists() else pd.DataFrame()
+    return artifacts
+
+
+def plot_supplementary_positive_dataset_profile(
+    data_dir: Path,
+    pdf_path: Path,
+    png_path: Path,
+) -> bool:
+    import matplotlib.pyplot as plt
+
+    artifacts = _load_dataset_artifacts(data_dir)
+    positives_df = pd.concat(
+        [artifacts["positives_split_a"], artifacts["positives_split_b"]],
+        ignore_index=True,
+    ).drop_duplicates(subset=["accession", "sequence"], keep="first")
+    metadata_df = artifacts["positive_metadata"]
+    if positives_df.empty or metadata_df.empty:
+        return False
+
+    split_positive_keys = set(
+        positives_df[["accession", "sequence"]].astype(str).itertuples(index=False, name=None)
+    )
+    metadata_filtered = metadata_df.loc[
+        metadata_df[["accession", "sequence"]].astype(str).apply(tuple, axis=1).isin(split_positive_keys)
+    ].copy()
+    coverage = pd.to_numeric(positives_df["epitope_coverage"], errors="coerce").dropna().astype(float)
+    retained_epitopes = pd.to_numeric(
+        metadata_filtered["n_epitopes_after_relative_filter"],
+        errors="coerce",
+    ).dropna().astype(float)
+    individual_lengths = pd.Series(
+        [
+            length
+            for value in metadata_filtered.get("epitope_lengths_raw", pd.Series(dtype=object))
+            for length in _parse_pipe_delimited_ints(value)
+        ],
+        dtype=float,
+    )
+    scatter_df = positives_df.copy()
+    scatter_df["sequence_length_plot"] = _coalesce_sequence_lengths(scatter_df)
+    scatter_df["epitope_coverage_plot"] = pd.to_numeric(
+        scatter_df.get("epitope_coverage", pd.Series(dtype=float)),
+        errors="coerce",
+    )
+    scatter_df["n_epitopes_plot"] = pd.to_numeric(
+        scatter_df.get("n_epitopes_after_relative_filter", pd.Series(dtype=float)),
+        errors="coerce",
+    )
+    scatter_df = scatter_df.dropna(
+        subset=["sequence_length_plot", "epitope_coverage_plot", "n_epitopes_plot"]
+    ).copy()
+    if coverage.empty or retained_epitopes.empty or individual_lengths.empty or scatter_df.empty:
+        return False
+
+    fig, axes = plt.subplots(2, 2, figsize=(6.8, 4.8))
+    ax_coverage, ax_counts, ax_lengths, ax_scatter = axes.ravel()
+
+    ax_coverage.hist(coverage, bins=np.linspace(0.0, 0.75, 16), color="#4C72B0", alpha=0.90)
+    ax_coverage.set_xlabel("Protein epitope coverage")
+    ax_coverage.set_ylabel("Proteins")
+    _style_axes(ax_coverage)
+
+    count_bins = np.arange(0.5, float(retained_epitopes.max()) + 1.5, 1.0)
+    ax_counts.hist(retained_epitopes, bins=count_bins, color="#55A868", alpha=0.90)
+    ax_counts.set_xlabel("Retained epitopes per protein")
+    ax_counts.set_ylabel("Proteins")
+    _style_axes(ax_counts)
+
+    ax_lengths.hist(individual_lengths, bins=np.arange(5.5, 46.5, 2.0), color="#DD8452", alpha=0.90)
+    ax_lengths.set_xlabel("Individual epitope length (aa)")
+    ax_lengths.set_ylabel("Epitopes")
+    _style_axes(ax_lengths)
+
+    scatter = ax_scatter.scatter(
+        scatter_df["sequence_length_plot"],
+        scatter_df["epitope_coverage_plot"],
+        c=scatter_df["n_epitopes_plot"].clip(upper=20),
+        cmap="viridis",
+        s=14,
+        alpha=0.85,
+        linewidths=0.0,
+    )
+    ax_scatter.set_xlabel("Sequence length (aa)")
+    ax_scatter.set_ylabel("Protein epitope coverage")
+    _style_axes(ax_scatter)
+    cbar = fig.colorbar(scatter, ax=ax_scatter, fraction=0.046, pad=0.04)
+    cbar.set_label("Retained epitopes")
+    cbar.ax.tick_params(labelsize=FONT_TICK)
+
+    fig.tight_layout()
+    _safe_savefig(fig, pdf_path, bbox_inches="tight")
+    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def _compute_main_alignment_significance(base_df: pd.DataFrame, signal_specs: list[tuple[str, str, str]]) -> pd.DataFrame:
     from scipy.stats import wilcoxon
 
@@ -396,6 +533,7 @@ def plot_main_residue_alignment_subset(
     png_path: Path,
 ) -> None:
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     metric_keys = ["auroc", "auprc", "precision_at_k"]
     metric_labels = {
@@ -410,7 +548,7 @@ def plot_main_residue_alignment_subset(
     annotation_pad = 0.015
     edge_pad = 0.01
 
-    fig, ax = plt.subplots(figsize=ONE_COLUMN_FIGSIZE)
+    fig, ax = plt.subplots(figsize=(ONE_COLUMN_FIGSIZE[0], 3.35))
     for metric_key in metric_keys:
         means = summary_df[f"{metric_key}_mean"].to_numpy(dtype=float)
         ci_low = summary_df[f"{metric_key}_ci_low"].to_numpy(dtype=float)
@@ -466,12 +604,32 @@ def plot_main_residue_alignment_subset(
 
     ax.set_yticks(y_positions)
     ax.set_yticklabels(signal_order, fontsize=FONT_TICK)
-    ax.set_xlabel("Score")
+    ax.set_xlabel("Score", labelpad=2)
     ax.set_xlim(x_min, x_max)
     ax.invert_yaxis()
     _style_axes(ax)
-    _legend_below(ax, ncol=3, y_offset=-0.23)
-    fig.tight_layout(rect=(0.0, 0.13, 1.0, 1.0))
+    handles, labels = ax.get_legend_handles_labels()
+    handle_map = {label: handle for handle, label in zip(handles, labels)}
+    baseline_labels = ["AUROC random baseline", "Residue prevalence baseline"]
+    metric_labels_ordered = ["AUROC", "AUPRC", "Precision@k"]
+    baseline_handles = [handle_map[label] for label in baseline_labels if label in handle_map]
+    baseline_text = [label for label in baseline_labels if label in handle_map]
+    metric_handles = [handle_map[label] for label in metric_labels_ordered if label in handle_map]
+    metric_text = [label for label in metric_labels_ordered if label in handle_map]
+    dummy_handle = Line2D([], [], linestyle="none", linewidth=0, alpha=0)
+    ax.legend(
+        [*baseline_handles, dummy_handle, *metric_handles],
+        [*baseline_text, "", *metric_text],
+        frameon=False,
+        fontsize=FONT_LEGEND,
+        loc="upper center",
+        bbox_to_anchor=(0.50, -0.30),
+        ncol=2,
+        columnspacing=1.8,
+        handletextpad=0.8,
+        borderaxespad=0.0,
+    )
+    fig.tight_layout(rect=(0.0, 0.26, 1.0, 1.0))
     _safe_savefig(fig, pdf_path, bbox_inches="tight")
     _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -747,13 +905,13 @@ def plot_main_ig_masking_vs_random(
         va="bottom",
         fontsize=FONT_AXIS + 1,
     )
-    ax.set_xlabel("Top-k percentage")
+    ax.set_xlabel("Top-k percentage", labelpad=2)
     ax.set_ylabel("Mean Δp")
     ax.set_xlim(float(ig_summary_df["k_pct"].min()) - 0.025, float(ig_summary_df["k_pct"].max()) + 0.025)
     ax.set_ylim(bottom=min(float(ig_summary_df["ci_low"].min()), y_bottom) - 0.03 * y_range, top=y_top + 0.10 * y_range)
     _style_axes(ax)
-    _legend_below(ax, ncol=2, y_offset=-0.30)
-    fig.tight_layout(rect=(0.0, 0.22, 1.0, 1.0))
+    _legend_below(ax, ncol=2, y_offset=-0.38)
+    fig.tight_layout(rect=(0.0, 0.30, 1.0, 1.0))
     _safe_savefig(fig, pdf_path, bbox_inches="tight")
     _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
