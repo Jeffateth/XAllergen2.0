@@ -406,6 +406,9 @@ def plot_main_residue_alignment_subset(
     signal_order = list(summary_df["Signal"])
     y_positions = np.arange(len(signal_order), dtype=float)
     offsets = {"auroc": -0.18, "auprc": 0.0, "precision_at_k": 0.18}
+    x_min, x_max = 0.0, 1.0
+    annotation_pad = 0.015
+    edge_pad = 0.01
 
     fig, ax = plt.subplots(figsize=ONE_COLUMN_FIGSIZE)
     for metric_key in metric_keys:
@@ -427,8 +430,10 @@ def plot_main_residue_alignment_subset(
         marker_col = f"{metric_key}_vs_random_marker"
         diff_col = f"{metric_key}_mean_diff_vs_random"
         if marker_col in summary_df.columns and diff_col in summary_df.columns:
-            for mean_value, y_pos, marker_value, mean_diff in zip(
+            for mean_value, ci_low_value, ci_high_value, y_pos, marker_value, mean_diff in zip(
                 means,
+                ci_low,
+                ci_high,
                 y_positions + offsets[metric_key],
                 summary_df[marker_col],
                 summary_df[diff_col],
@@ -436,13 +441,16 @@ def plot_main_residue_alignment_subset(
                 if pd.isna(marker_value) or str(marker_value) == "ns":
                     continue
                 direction = "↑" if float(mean_diff) > 0 else "↓"
+                right_x = min(float(ci_high_value) + annotation_pad, x_max - edge_pad)
+                left_x = max(float(ci_low_value) - annotation_pad, x_min + edge_pad)
+                place_right = float(ci_high_value) + annotation_pad <= x_max - edge_pad
                 ax.text(
-                    float(mean_value) + 0.028,
+                    right_x if place_right else left_x,
                     float(y_pos),
                     f"{direction}{marker_value}",
                     color=METRIC_COLOR_MAP[metric_key],
                     fontsize=max(FONT_TICK - 0.3, 6.0),
-                    ha="left",
+                    ha="left" if place_right else "right",
                     va="center",
                 )
 
@@ -459,7 +467,7 @@ def plot_main_residue_alignment_subset(
     ax.set_yticks(y_positions)
     ax.set_yticklabels(signal_order, fontsize=FONT_TICK)
     ax.set_xlabel("Score")
-    ax.set_xlim(0.0, 1.0)
+    ax.set_xlim(x_min, x_max)
     ax.invert_yaxis()
     _style_axes(ax)
     _legend_below(ax, ncol=3, y_offset=-0.23)
