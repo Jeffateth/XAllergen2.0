@@ -3,9 +3,9 @@
 Signal & Category & n_proteins & AUROC mean with 95% CI & AUPRC mean with 95% CI & Precision@k mean with 95% CI & AUROC vs random & AUPRC vs random & Precision@k vs random \\
 \midrule
 Random & Null baseline & 61 & 0.501 [0.499, 0.502] & 0.267 [0.218, 0.320] & 0.250 [0.200, 0.303] & NaN & NaN & NaN \\
-Frozen ESM-2 IG & Post-hoc attribution & 61 & 0.476 [0.443, 0.511] & 0.257 [0.206, 0.315] & 0.216 [0.162, 0.275] & ns (q=0.151) & ns (q=0.057) & lower ** (q=0.002) \\
-Frozen ESM-2 occlusion & Perturbation sensitivity & 61 & 0.496 [0.480, 0.511] & 0.264 [0.214, 0.315] & 0.235 [0.182, 0.292] & ns (q=0.759) & ns (q=0.085) & lower ** (q=0.007) \\
-MTL ESM-2 residue head & Supervised residue predictor & 61 & 0.634 [0.594, 0.672] & 0.372 [0.307, 0.442] & 0.345 [0.282, 0.413] & higher *** (q=9.5e-07) & higher *** (q=9.4e-06) & higher *** (q=1.0e-04) \\
-DeepPlantAllergy IG & Post-hoc attribution & 61 & 0.524 [0.480, 0.565] & 0.295 [0.236, 0.359] & 0.255 [0.194, 0.318] & ns (q=0.310) & ns (q=0.155) & ns (q=0.866) \\
+Frozen ESM-2 IG & Post-hoc attribution & 61 & 0.476 [0.443, 0.511] & 0.257 [0.206, 0.315] & 0.216 [0.162, 0.275] & ns (q=0.201) & ns (q=0.057) & lower ** (q=0.002) \\
+Frozen ESM-2 occlusion & Perturbation sensitivity & 61 & 0.496 [0.480, 0.511] & 0.264 [0.214, 0.315] & 0.235 [0.182, 0.292] & ns (q=0.695) & ns (q=0.066) & lower ** (q=0.004) \\
+MTL ESM-2 residue head & Supervised residue predictor & 61 & 0.634 [0.594, 0.672] & 0.372 [0.307, 0.442] & 0.345 [0.282, 0.413] & higher *** (q=3.2e-07) & higher *** (q=6.3e-06) & higher *** (q=1.0e-04) \\
+DeepPlantAllergy IG & Post-hoc attribution & 61 & 0.524 [0.480, 0.565] & 0.295 [0.236, 0.359] & 0.255 [0.194, 0.318] & ns (q=0.344) & ns (q=0.117) & ns (q=0.866) \\
 \bottomrule
 \end{tabular}

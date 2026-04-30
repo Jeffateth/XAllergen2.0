@@ -69,6 +69,20 @@ METRIC_COLOR_MAP = {
     "precision_at_k": "#55A868",
 }
 
+MODEL_FAMILY_COLOR_MAP = {
+    "Frozen ESM-2": "#4C72B0",
+    "MTL ESM-2": "#DD8452",
+    "MTL ESM-2 top 1": "#55A868",
+    "DeepPlantAllergy": "#C44E52",
+}
+
+MODEL_FAMILY_DISPLAY_LABELS = {
+    "Frozen ESM-2": "Frozen ESM-2",
+    "MTL ESM-2": "MTL ESM-2",
+    "MTL ESM-2 top 1": "MTL ESM-2\ntop 1",
+    "DeepPlantAllergy": "DeepPlantAllergy",
+}
+
 
 def build_output_paths_for_supported_mtl(
     family_key: str,
@@ -262,6 +276,123 @@ def _load_dataset_artifacts(data_dir: Path) -> dict[str, pd.DataFrame]:
     return artifacts
 
 
+def _canonical_model_family_label(label: object) -> str:
+    text = str(label).strip()
+    aliases = {
+        "Frozen ESM-2": "Frozen ESM-2",
+        "MTL ESM-2": "MTL ESM-2",
+        "MTL ESM-2 top-1": "MTL ESM-2 top 1",
+        "MTL ESM-2 top 1": "MTL ESM-2 top 1",
+        "DeepPlantAllergy": "DeepPlantAllergy",
+    }
+    return aliases.get(text, text)
+
+
+def _load_probe_rows_csv_with_label(rows_csv: Path, model_family_label: str | None = None) -> pd.DataFrame:
+    header = pd.read_csv(rows_csv, nrows=0)
+    columns = [
+        "sequence_id",
+        "accession",
+        "seq_len",
+        "epitope_density",
+        "n_epitope_residues",
+        "model_family",
+        "method",
+        "label_variant",
+        "auroc",
+        "auprc",
+        "precision_at_k",
+        "source_probe_rows_path",
+        "family_key",
+    ]
+    usecols = [column for column in columns if column in header.columns]
+    frame = ensure_label_variant_column(pd.read_csv(rows_csv, usecols=usecols))
+    frame = frame.copy()
+    if model_family_label is not None:
+        frame["model_family"] = model_family_label
+    elif "model_family" in frame.columns:
+        frame["model_family"] = frame["model_family"].map(_canonical_model_family_label)
+    frame["source_probe_rows_path"] = frame.get("source_probe_rows_path", str(rows_csv))
+    if "source_probe_rows_path" in frame.columns:
+        frame["source_probe_rows_path"] = frame["source_probe_rows_path"].fillna(str(rows_csv))
+    return frame
+
+
+def _augment_combined_probe_rows_from_siblings(combined_df: pd.DataFrame, combined_probe_rows_path: Path) -> pd.DataFrame:
+    sibling_map = {
+        "baseline_probing_rows.csv": "Frozen ESM-2",
+        "mtl_probing_rows.csv": "MTL ESM-2",
+        "mtl_top1_unfrozen_probing_rows.csv": "MTL ESM-2 top 1",
+        "deep_plant_allergy_benchmark_probing_rows.csv": "DeepPlantAllergy",
+    }
+    working = ensure_label_variant_column(combined_df.copy())
+    if "model_family" in working.columns:
+        working["model_family"] = working["model_family"].map(_canonical_model_family_label)
+    present_families = set(working.get("model_family", pd.Series(dtype=str)).dropna().astype(str))
+    extra_frames: list[pd.DataFrame] = []
+    rows_dir = Path(combined_probe_rows_path).parent
+    for filename, model_family_label in sibling_map.items():
+        probe_rows_path = rows_dir / filename
+        if not probe_rows_path.exists():
+            continue
+        sibling_frame = _load_probe_rows_csv_with_label(probe_rows_path, model_family_label)
+        if model_family_label not in present_families:
+            print(
+                f"Warning: {combined_probe_rows_path.name} is missing {model_family_label}; "
+                f"loading rows from {probe_rows_path.name}."
+            )
+            extra_frames.append(sibling_frame)
+            continue
+        existing_methods = set(
+            working.loc[working["model_family"].astype(str).eq(model_family_label), "method"]
+            .dropna()
+            .astype(str)
+        )
+        sibling_methods = set(sibling_frame["method"].dropna().astype(str))
+        missing_methods = sorted(
+            method for method in sibling_methods if method in ACTIVE_METHOD_KEYS and method not in existing_methods
+        )
+        if missing_methods:
+            print(
+                f"Warning: {combined_probe_rows_path.name} is missing {model_family_label} methods "
+                f"{missing_methods}; backfilling from {probe_rows_path.name}."
+            )
+            extra_frames.append(
+                sibling_frame.loc[sibling_frame["method"].astype(str).isin(missing_methods)].copy()
+            )
+    if extra_frames:
+        working = ensure_label_variant_column(pd.concat([working, *extra_frames], ignore_index=True))
+    return working
+
+
+def _pick_probe_pair_key(frame: pd.DataFrame) -> str | None:
+    for candidate in ("sequence_id", "accession", "entry"):
+        if candidate in frame.columns and frame[candidate].notna().any():
+            return candidate
+    return None
+
+
+def _metric_axis_limits(summary_df: pd.DataFrame, metric_key: str) -> tuple[float, float]:
+    if metric_key == "auroc":
+        return 0.0, 1.0
+    metric_subset = summary_df.loc[summary_df["metric"] == metric_key].copy()
+    if metric_subset.empty:
+        return 0.0, 1.0
+    max_value = float(
+        np.nanmax(
+            np.concatenate(
+                [
+                    metric_subset["ci_high"].to_numpy(dtype=float),
+                    metric_subset["mean"].to_numpy(dtype=float),
+                    metric_subset["random_mean"].dropna().to_numpy(dtype=float),
+                ]
+            )
+        )
+    )
+    upper = min(1.0, max(0.25, max_value + 0.08))
+    return 0.0, upper
+
+
 def plot_supplementary_positive_dataset_profile(
     data_dir: Path,
     pdf_path: Path,
@@ -399,9 +530,10 @@ def _compute_main_alignment_significance(base_df: pd.DataFrame, signal_specs: li
     significance_df = pd.DataFrame(test_rows)
     if significance_df.empty:
         return significance_df
-    significance_df["q_value_vs_random"] = _benjamini_hochberg(
-        significance_df["p_value_vs_random"].tolist()
-    )
+    significance_df["q_value_vs_random"] = np.nan
+    for metric_key, metric_df in significance_df.groupby("metric_key", sort=False):
+        q_values = _benjamini_hochberg(metric_df["p_value_vs_random"].tolist())
+        significance_df.loc[metric_df.index, "q_value_vs_random"] = q_values
     significance_df["vs_random_summary"] = significance_df.apply(
         lambda row: _format_vs_random(
             float(row["mean_diff_vs_random"]),
@@ -713,6 +845,392 @@ def write_supplementary_signal_tables(
         )
     _write_table_outputs(table_df, csv_path, tex_path)
     return table_df
+
+
+def plot_supplementary_all_signals_significance(
+    combined_probe_rows_path: Path,
+    pdf_path: Path,
+    png_path: Path,
+    summary_csv_path: Path | None = None,
+    summary_tex_path: Path | None = None,
+) -> pd.DataFrame:
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from scipy.stats import wilcoxon
+
+    combined_probe_rows_path = Path(combined_probe_rows_path)
+    combined_df = _load_probe_rows_csv_with_label(combined_probe_rows_path)
+    combined_df = _augment_combined_probe_rows_from_siblings(combined_df, combined_probe_rows_path)
+    combined_df = ensure_label_variant_column(combined_df)
+    if "label_variant" in combined_df.columns:
+        combined_df = combined_df.loc[combined_df["label_variant"].astype(str).eq("original")].copy()
+    combined_df = combined_df.loc[combined_df["method"].isin(ACTIVE_METHOD_KEYS)].copy()
+    if combined_df.empty:
+        print("Warning: no active original-label probe rows were found for supplementary all-signals significance.")
+        return pd.DataFrame(
+            columns=[
+                "model_family",
+                "method",
+                "method_label",
+                "metric",
+                "mean",
+                "ci_low",
+                "ci_high",
+                "random_mean",
+                "mean_diff_vs_random",
+                "n_pairs",
+                "p_value",
+                "q_value",
+                "significance",
+            ]
+        )
+
+    pair_key = _pick_probe_pair_key(combined_df)
+    if pair_key is None:
+        print("Warning: no sequence_id/accession/entry column found; skipping paired significance tests.")
+
+    family_order = {
+        "Frozen ESM-2": 0,
+        "MTL ESM-2": 1,
+        "MTL ESM-2 top 1": 2,
+        "DeepPlantAllergy": 3,
+    }
+    method_order = {
+        "random_mean": 0,
+        "attention_weights": 1,
+        "integrated_gradients": 2,
+        "gradient_x_input": 3,
+        "smoothgrad_ig": 4,
+        "occlusion": 5,
+        "residue_head": 6,
+    }
+    metric_keys = ["auroc", "auprc", "precision_at_k"]
+    metric_display = {
+        "auroc": "AUROC",
+        "auprc": "AUPRC",
+        "precision_at_k": "Precision@k",
+    }
+    method_axis_labels = {
+        "random_mean": "Random",
+        "attention_weights": "Attention",
+        "integrated_gradients": "IG",
+        "gradient_x_input": "Grad×Input",
+        "smoothgrad_ig": "SmoothGrad-IG",
+        "occlusion": "Occlusion",
+        "residue_head": "Residue head",
+    }
+
+    random_lookup: dict[tuple[str, str], float] = {}
+    for model_family, subset in combined_df.groupby("model_family", dropna=False):
+        random_subset = subset.loc[subset["method"].astype(str).eq("random_mean")].copy()
+        for metric_key in metric_keys:
+            if random_subset.empty:
+                random_lookup[(str(model_family), metric_key)] = float("nan")
+            else:
+                random_lookup[(str(model_family), metric_key)] = float(random_subset[metric_key].mean())
+
+    summary_rows: list[dict[str, Any]] = []
+    test_rows: list[dict[str, Any]] = []
+    available_pairs = (
+        combined_df[["model_family", "method"]]
+        .drop_duplicates()
+        .assign(
+            _family_order=lambda frame: frame["model_family"].map(family_order).fillna(99),
+            _method_order=lambda frame: frame["method"].map(method_order).fillna(99),
+        )
+        .sort_values(["_family_order", "_method_order", "model_family", "method"])
+        .drop(columns=["_family_order", "_method_order"])
+    )
+
+    for pair in available_pairs.itertuples(index=False):
+        model_family = str(pair.model_family)
+        method_key = str(pair.method)
+        subset = combined_df.loc[
+            combined_df["model_family"].astype(str).eq(model_family)
+            & combined_df["method"].astype(str).eq(method_key)
+        ].copy()
+        if subset.empty:
+            continue
+        for metric_key in metric_keys:
+            mean_value, ci_low, ci_high = bootstrap_mean_ci(subset[metric_key])
+            random_mean = random_lookup.get((model_family, metric_key), float("nan"))
+            summary_row = {
+                "model_family": model_family,
+                "method": method_key,
+                "method_label": METHOD_PUBLICATION_LABELS.get(method_key, method_key),
+                "metric": metric_display[metric_key],
+                "metric_key": metric_key,
+                "mean": mean_value,
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+                "random_mean": random_mean,
+                "mean_diff_vs_random": float(mean_value - random_mean) if pd.notna(random_mean) else float("nan"),
+                "n_pairs": np.nan,
+                "p_value": np.nan,
+                "q_value": np.nan,
+                "significance": "NA",
+            }
+            if method_key != "random_mean" and pair_key is not None:
+                random_subset = combined_df.loc[
+                    combined_df["model_family"].astype(str).eq(model_family)
+                    & combined_df["method"].astype(str).eq("random_mean")
+                ][[pair_key, metric_key]].copy()
+                if random_subset.empty:
+                    print(f"Warning: {model_family} lacks random_mean; skipping {metric_display[metric_key]} test for {method_key}.")
+                else:
+                    method_subset = subset[[pair_key, metric_key]].copy()
+                    paired_df = method_subset.merge(
+                        random_subset,
+                        on=pair_key,
+                        suffixes=("", "_random"),
+                    ).dropna(subset=[metric_key, f"{metric_key}_random"])
+                    n_pairs = int(len(paired_df))
+                    summary_row["n_pairs"] = n_pairs
+                    if n_pairs < 3:
+                        print(
+                            f"Warning: only {n_pairs} paired proteins for {model_family} | {method_key} | "
+                            f"{metric_display[metric_key]}; skipping Wilcoxon test."
+                        )
+                    else:
+                        diffs = paired_df[metric_key] - paired_df[f"{metric_key}_random"]
+                        nonzero_diffs = diffs.loc[diffs != 0]
+                        p_value = 1.0
+                        if not nonzero_diffs.empty:
+                            p_value = float(
+                                wilcoxon(
+                                    paired_df[metric_key].to_numpy(dtype=float),
+                                    paired_df[f"{metric_key}_random"].to_numpy(dtype=float),
+                                    alternative="two-sided",
+                                    zero_method="wilcox",
+                                ).pvalue
+                            )
+                        summary_row["p_value"] = p_value
+                        summary_row["mean_diff_vs_random"] = float(diffs.mean())
+                        test_rows.append(
+                            {
+                                "model_family": model_family,
+                                "method": method_key,
+                                "metric_key": metric_key,
+                                "p_value": p_value,
+                            }
+                        )
+            summary_rows.append(summary_row)
+
+    summary_df = pd.DataFrame(summary_rows)
+    if summary_df.empty:
+        print("Warning: no supplementary all-signals summary rows could be computed.")
+        return summary_df
+
+    if test_rows:
+        test_df = pd.DataFrame(test_rows)
+        q_value_map: dict[tuple[str, str, str], float] = {}
+        for metric_key, metric_tests in test_df.groupby("metric_key", sort=False):
+            q_values = _benjamini_hochberg(metric_tests["p_value"].tolist())
+            for row, q_value in zip(metric_tests.itertuples(index=False), q_values):
+                q_value_map[(str(row.model_family), str(row.method), str(metric_key))] = float(q_value)
+        summary_df["q_value"] = [
+            q_value_map.get((str(row.model_family), str(row.method), str(row.metric_key)), np.nan)
+            for row in summary_df.itertuples(index=False)
+        ]
+        summary_df["significance"] = [
+            _significance_marker(value) if pd.notna(value) else ("NA" if row.method != "random_mean" else "")
+            for value, row in zip(summary_df["q_value"], summary_df.itertuples(index=False))
+        ]
+    else:
+        summary_df["significance"] = [""] * len(summary_df)
+
+    summary_df["_family_order"] = summary_df["model_family"].map(family_order).fillna(99)
+    summary_df["_method_order"] = summary_df["method"].map(method_order).fillna(99)
+    summary_df["_metric_order"] = summary_df["metric_key"].map({key: idx for idx, key in enumerate(metric_keys)})
+    summary_df["method_axis_label"] = summary_df["method"].map(lambda value: method_axis_labels.get(str(value), str(value)))
+    summary_df["row_label"] = summary_df["method_axis_label"]
+    summary_df = summary_df.sort_values(
+        ["_family_order", "_method_order", "_metric_order", "model_family", "row_label"]
+    ).reset_index(drop=True)
+
+    export_df = summary_df[
+        [
+            "model_family",
+            "method",
+            "method_label",
+            "metric",
+            "mean",
+            "ci_low",
+            "ci_high",
+            "random_mean",
+            "mean_diff_vs_random",
+            "n_pairs",
+            "p_value",
+            "q_value",
+            "significance",
+        ]
+    ].copy()
+    if summary_csv_path is not None:
+        summary_csv_path = Path(summary_csv_path)
+        summary_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        export_df.to_csv(summary_csv_path, index=False)
+    if summary_tex_path is not None:
+        tex_df = export_df.copy()
+        tex_df["mean [95% CI]"] = [
+            _format_mean_ci(row.mean, row.ci_low, row.ci_high)
+            for row in tex_df.itertuples(index=False)
+        ]
+        tex_df["q_value"] = tex_df["q_value"].map(lambda value: _format_q_value(value) if pd.notna(value) else "NA")
+        tex_df["mean_diff_vs_random"] = tex_df["mean_diff_vs_random"].map(
+            lambda value: f"{value:.3f}" if pd.notna(value) else "NA"
+        )
+        tex_table = tex_df[
+            [
+                "model_family",
+                "method_label",
+                "metric",
+                "mean [95% CI]",
+                "mean_diff_vs_random",
+                "n_pairs",
+                "q_value",
+                "significance",
+            ]
+        ].rename(
+            columns={
+                "model_family": "Model",
+                "method_label": "Signal",
+                "metric": "Metric",
+                "mean_diff_vs_random": "Δ vs random",
+                "n_pairs": "n pairs",
+                "q_value": "q",
+                "significance": "Sig.",
+            }
+        )
+        Path(summary_tex_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(summary_tex_path).write_text(tex_table.to_latex(index=False, escape=False), encoding="utf-8")
+
+    row_order = (
+        summary_df[["model_family", "row_label", "_family_order", "_method_order"]]
+        .drop_duplicates()
+        .sort_values(["_family_order", "_method_order", "row_label"])
+    )
+    ordered_rows = list(row_order.itertuples(index=False))
+    row_positions: list[float] = []
+    row_method_labels: list[str] = []
+    family_blocks: list[dict[str, float | str]] = []
+    label_to_y: dict[tuple[str, str], float] = {}
+    current_y = 0.0
+    block_start = 0.0
+    previous_family: str | None = None
+    separator_positions: list[float] = []
+    for row in ordered_rows:
+        family = str(row.model_family)
+        method_label = str(row.row_label)
+        if previous_family is not None and family != previous_family:
+            family_blocks.append(
+                {
+                    "family": previous_family,
+                    "start": block_start,
+                    "end": current_y - 1.0,
+                    "mid": (block_start + current_y - 1.0) / 2.0,
+                }
+            )
+            separator_positions.append(current_y - 0.5)
+            current_y += 0.8
+            block_start = current_y
+        row_positions.append(current_y)
+        row_method_labels.append(method_label)
+        label_to_y[(family, method_label)] = current_y
+        previous_family = family
+        current_y += 1.0
+    if previous_family is not None:
+        family_blocks.append(
+            {
+                "family": previous_family,
+                "start": block_start,
+                "end": current_y - 1.0,
+                "mid": (block_start + current_y - 1.0) / 2.0,
+            }
+        )
+
+    fig_height = max(5.4, 0.31 * current_y + 1.45)
+    fig, axes = plt.subplots(1, 3, figsize=(7.6, fig_height), sharey=True)
+
+    for ax, metric_key in zip(axes, metric_keys):
+        metric_name = metric_display[metric_key]
+        metric_df = summary_df.loc[summary_df["metric_key"] == metric_key].copy()
+        metric_df["y"] = [
+            label_to_y[(str(row.model_family), str(row.row_label))]
+            for row in metric_df.itertuples(index=False)
+        ]
+        metric_df = metric_df.sort_values("y")
+        for separator_y in separator_positions:
+            ax.axhline(separator_y, color="#D9D9D9", linewidth=0.8, zorder=0)
+        for row in metric_df.itertuples(index=False):
+            family_color = MODEL_FAMILY_COLOR_MAP.get(str(row.model_family), "#4C72B0")
+            ax.errorbar(
+                [float(row.mean)],
+                [float(row.y)],
+                xerr=[[float(row.mean - row.ci_low)], [float(row.ci_high - row.mean)]],
+                fmt="o",
+                ms=4.4,
+                linewidth=1.2,
+                capsize=2.5,
+                color=family_color,
+                ecolor=family_color,
+            )
+            if row.method == "random_mean" or pd.isna(row.q_value) or str(row.significance) in {"", "NA", "ns"}:
+                continue
+            direction = "↑" if float(row.mean_diff_vs_random) > 0 else "↓"
+            label = f"{direction}{row.significance}"
+            x_low, x_high = _metric_axis_limits(summary_df, metric_key)
+            pad = max(0.012, 0.028 * (x_high - x_low))
+            text_x = min(float(row.ci_high) + pad, x_high - 0.01 * (x_high - x_low))
+            ha = "left"
+            if float(row.ci_high) + pad >= x_high - 0.01 * (x_high - x_low):
+                text_x = max(float(row.ci_low) - pad, x_low + 0.01 * (x_high - x_low))
+                ha = "right"
+            ax.text(
+                text_x,
+                float(row.y),
+                label,
+                color="#333333",
+                fontsize=max(FONT_TICK + 0.2, 7.0),
+                ha=ha,
+                va="center",
+            )
+        if metric_key == "auroc":
+            ax.axvline(0.5, color="#7F7F7F", linestyle="--", linewidth=1.0)
+        ax.set_xlim(0.0, 1.0)
+        ax.set_xlabel(metric_name)
+        ax.set_title(metric_name, fontsize=FONT_AXIS, pad=12)
+        _style_axes(ax)
+        ax.grid(axis="x", color="#E6E6E6", linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.set_ylim(current_y - 0.5, -1.5)
+
+    axes[0].set_yticks(row_positions)
+    axes[0].set_yticklabels(row_method_labels, fontsize=FONT_TICK)
+    axes[0].set_ylabel("")
+    for ax in axes[1:]:
+        ax.set_yticks(row_positions)
+        ax.tick_params(axis="y", labelleft=False)
+    legend_handles = [
+        Line2D([], [], marker="o", linestyle="none", markersize=5.5, color=color, label=family)
+        for family, color in MODEL_FAMILY_COLOR_MAP.items()
+        if family in set(summary_df["model_family"].astype(str))
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.02),
+        ncol=min(4, max(1, len(legend_handles))),
+        frameon=False,
+        fontsize=FONT_LEGEND,
+        columnspacing=1.0,
+        handletextpad=0.4,
+        borderaxespad=0.0,
+    )
+    fig.subplots_adjust(left=0.34, right=0.98, top=0.96, bottom=0.10, wspace=0.25)
+    _safe_savefig(fig, pdf_path, bbox_inches="tight")
+    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return export_df
 
 
 def plot_supplementary_all_signals_heatmap(
