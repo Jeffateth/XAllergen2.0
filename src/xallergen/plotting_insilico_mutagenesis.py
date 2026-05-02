@@ -221,17 +221,8 @@ def _summarize_transition_residues(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _select_labels_for_scatter(
-    frame: pd.DataFrame,
-    n_top_delta: int = 6,
-    n_top_fraction: int = 4,
-    always_label: tuple[str, ...] = ("G", "K", "A", "Q", "M", "R"),
-) -> set[str]:
-    labels = set(always_label)
-    labels.update(frame.nlargest(n_top_delta, "mean_delta_p_all")["original_aa"].astype(str).tolist())
-    labels.update(frame.nlargest(n_top_fraction, "frac_reducing")["original_aa"].astype(str).tolist())
-    labels.update(frame.nsmallest(2, "mean_delta_p_all")["original_aa"].astype(str).tolist())
-    return labels
+def _select_labels_for_scatter(frame: pd.DataFrame) -> set[str]:
+    return set(frame["original_aa"].astype(str))
 
 
 def _summarize_top_supported_transitions(frame: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
@@ -483,25 +474,39 @@ def _plot_transition_scatter(summary_df: pd.DataFrame, output_path: Path) -> Non
         sizes = 45 + 220 * ((df["n_total"] - df["n_total"].min()) / (df["n_total"].max() - df["n_total"].min()))
     else:
         sizes = np.full(len(df), 120.0)
-    rng = np.random.default_rng(42)
-    x_span = df["frac_reducing"].max() - df["frac_reducing"].min()
-    y_span = df["mean_delta_p_all"].max() - df["mean_delta_p_all"].min()
-    df["plot_x"] = df["frac_reducing"] + rng.normal(0, max(0.003, 0.012 * x_span), size=len(df))
-    df["plot_y"] = df["mean_delta_p_all"] + rng.normal(0, max(0.00015, 0.020 * y_span), size=len(df))
+    df["plot_x"] = df["frac_reducing"]
+    df["plot_y"] = df["mean_delta_p_all"]
 
     fig, ax = plt.subplots(figsize=(ICML_ONE_COLUMN_WIDTH, PAPER_TALL_HEIGHT))
     ax.scatter(df["plot_x"], df["plot_y"], s=sizes, c=colors, alpha=0.78, edgecolors="black", linewidth=0.6, zorder=3)
     ax.axhline(0, color="black", linewidth=1, linestyle="--", alpha=0.45, zorder=1)
     ax.axvline(0.5, color="gray", linewidth=1, linestyle="--", alpha=0.45, zorder=1)
-    residues_to_label = _select_labels_for_scatter(df)
     texts = []
     for _, row in df.iterrows():
         aa = str(row["original_aa"])
-        if aa not in residues_to_label:
+        if aa not in _select_labels_for_scatter(df):
             continue
-        texts.append(ax.text(row["plot_x"], row["plot_y"], aa, fontsize=PAPER_ANNOT_FONTSIZE, ha="center", va="center", zorder=4))
+        if aa in {"G", "C", "K", "M", "R"}:
+            label_fontsize = PAPER_ANNOT_FONTSIZE
+        elif aa == "A":
+            label_fontsize = max(PAPER_ANNOT_FONTSIZE - 7, 4)
+        elif aa == "Y":
+            label_fontsize = max(PAPER_ANNOT_FONTSIZE - 5, 6)
+        else:
+            label_fontsize = max(PAPER_ANNOT_FONTSIZE - 5, 6)
+        texts.append(
+            ax.text(
+                row["plot_x"],
+                row["plot_y"],
+                aa,
+                fontsize=label_fontsize,
+                ha="center",
+                va="center",
+                zorder=4,
+            )
+        )
     if adjust_text is not None and texts:
-        adjust_text(texts, ax=ax, expand_points=(1.5, 1.8), expand_text=(1.2, 1.4))
+        adjust_text(texts, ax=ax, expand_points=(1.2, 1.4), expand_text=(1.1, 1.2))
     ax.set_xlabel("Fraction of reducing substitutions")
     ax.set_ylabel("Mean Delta p")
     x_min = max(0.0, float(df["plot_x"].min()) - 0.045)
