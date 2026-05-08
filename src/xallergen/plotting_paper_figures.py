@@ -1320,6 +1320,7 @@ def plot_main_ig_masking_vs_random(
     png_path: Path,
 ) -> dict[str, Any]:
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     sweep_df = pd.read_csv(ig_validation_sweep_csv)
     random_df = pd.read_csv(ig_vs_random_baseline_csv)
@@ -1428,8 +1429,31 @@ def plot_main_ig_masking_vs_random(
     ax.set_xlim(float(ig_summary_df["k_pct"].min()) - 0.025, float(ig_summary_df["k_pct"].max()) + 0.025)
     ax.set_ylim(bottom=min(float(ig_summary_df["ci_low"].min()), y_bottom) - 0.03 * y_range, top=y_top + 0.10 * y_range)
     _style_axes(ax)
-    _legend_below(ax, ncol=2, y_offset=-0.38)
-    fig.tight_layout(rect=(0.0, 0.30, 1.0, 1.0))
+    legend_handles = [
+        Line2D([], [], color="#4C72B0", marker="o", markersize=3.8, linewidth=1.4, label="IG-guided masking"),
+        Line2D(
+            [],
+            [],
+            color="#C44E52",
+            marker="D",
+            markersize=4.5,
+            linewidth=0,
+            linestyle="none",
+            markerfacecolor="#C44E52",
+            markeredgecolor="#C44E52",
+            label="Random masking (selected k)",
+        ),
+    ]
+    ax.legend(
+        handles=legend_handles,
+        frameon=False,
+        fontsize=FONT_LEGEND,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.40),
+        ncol=2,
+        borderaxespad=0.0,
+    )
+    fig.tight_layout(rect=(0.0, 0.18, 1.0, 1.0))
     _safe_savefig(fig, pdf_path, bbox_inches="tight")
     _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
     plt.close(fig)

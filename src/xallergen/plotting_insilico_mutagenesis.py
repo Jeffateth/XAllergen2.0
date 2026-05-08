@@ -345,7 +345,7 @@ def _plot_stage1_diagnostics(ig_validation_sweep_df: pd.DataFrame, output_dir: P
             summary_df["pct_validated_ci_high"].to_numpy() - heights,
         ]
     )
-    fig, ax = plt.subplots(figsize=(ICML_ONE_COLUMN_WIDTH, PAPER_SHORT_HEIGHT))
+    fig, ax = plt.subplots(figsize=(5.2, PAPER_SHORT_HEIGHT))
     ax.bar(x_positions, heights, color="#55A868", alpha=0.9)
     ax.errorbar(x_positions, heights, yerr=yerr, fmt="none", ecolor="black", capsize=4, linewidth=1.2)
     ax.set_xticks(x_positions)
@@ -477,7 +477,7 @@ def _plot_transition_scatter(summary_df: pd.DataFrame, output_path: Path) -> Non
     df["plot_x"] = df["frac_reducing"]
     df["plot_y"] = df["mean_delta_p_all"]
 
-    fig, ax = plt.subplots(figsize=(ICML_ONE_COLUMN_WIDTH, PAPER_TALL_HEIGHT))
+    fig, ax = plt.subplots(figsize=(ICML_ONE_COLUMN_WIDTH, PAPER_SHORT_HEIGHT))
     ax.scatter(df["plot_x"], df["plot_y"], s=sizes, c=colors, alpha=0.78, edgecolors="black", linewidth=0.6, zorder=3)
     ax.axhline(0, color="black", linewidth=1, linestyle="--", alpha=0.45, zorder=1)
     ax.axvline(0.5, color="gray", linewidth=1, linestyle="--", alpha=0.45, zorder=1)
@@ -486,7 +486,9 @@ def _plot_transition_scatter(summary_df: pd.DataFrame, output_path: Path) -> Non
         aa = str(row["original_aa"])
         if aa not in _select_labels_for_scatter(df):
             continue
-        if aa in {"G", "C", "K", "M", "R"}:
+        if aa in {"M", "R"}:
+            label_fontsize = max(PAPER_ANNOT_FONTSIZE - 3, 5)
+        elif aa in {"G", "C", "K"}:
             label_fontsize = PAPER_ANNOT_FONTSIZE
         elif aa == "A":
             label_fontsize = max(PAPER_ANNOT_FONTSIZE - 7, 4)
@@ -519,16 +521,24 @@ def _plot_transition_scatter(summary_df: pd.DataFrame, output_path: Path) -> Non
     ax.legend(
         handles=legend_handles,
         title="Residue class",
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.24),
-        ncol=2,
-        fontsize=max(PAPER_ANNOT_FONTSIZE - 1, 6),
-        title_fontsize=max(PAPER_ANNOT_FONTSIZE - 1, 6),
+        loc="lower right",
+        bbox_to_anchor=(0.985, 0.03),
+        ncol=1,
+        fontsize=max(PAPER_ANNOT_FONTSIZE - 3, 5.5),
+        title_fontsize=max(PAPER_ANNOT_FONTSIZE - 3, 5.5),
         frameon=True,
-        borderaxespad=0.0,
+        facecolor="white",
+        framealpha=0.82,
+        edgecolor="#d0d0d0",
+        borderpad=0.2,
+        labelspacing=0.18,
+        handlelength=0.75,
+        handletextpad=0.28,
+        columnspacing=0.6,
+        borderaxespad=0.2,
     )
     ax.spines[["top", "right"]].set_visible(False)
-    fig.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
+    fig.tight_layout()
     fig.savefig(output_path, bbox_inches="tight", dpi=300)
     plt.close(fig)
 
