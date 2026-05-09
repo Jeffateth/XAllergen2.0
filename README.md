@@ -8,7 +8,6 @@ Code for the paper *Residue-Level Attributions in Protein Allergenicity Models D
 data/                         Curated input tables, epitope labels, cache files
 models/                       Trained baseline and MTL checkpoints
 notebooks/                    Reproducible analysis notebooks
-  Legacy scripts/             Archived notebooks and utilities
 results/
   classification/             Protein-level training/evaluation metrics
   insilico_mutagenesis/       Saturation mutagenesis tables and figures
@@ -17,7 +16,6 @@ results/
   probing/
     rows/                     Per-protein residue-localization metrics
     summaries/                Bootstrap summaries and comparison tables
-  legacy/                     Archived result outputs from earlier analyses
 Makefile                      Convenience commands
 pyproject.toml                Project metadata and dependencies
 replot_probe_figures.py       Figure replotting utility

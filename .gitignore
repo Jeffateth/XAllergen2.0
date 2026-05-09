@@ -10,3 +10,4 @@ __pycache__/
 outputs/
 external/
 notebooks/Legacy\ scripts/
+results/legacy/
