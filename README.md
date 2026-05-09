@@ -1,6 +1,6 @@
-# Predictively Strong, Immunologically Blind
+# XAllergen
 
-Code for the paper *Predictively Strong, Immunologically Blind: Benchmarking Faithfulness in Protein Allergenicity Models*.
+Code for the paper *Residue-Level Attributions in Protein Allergenicity Models Do Not Recover Allergen Epitopes*.
 
 ## Repository Layout
 
@@ -8,17 +8,22 @@ Code for the paper *Predictively Strong, Immunologically Blind: Benchmarking Fai
 data/                         Curated input tables, epitope labels, cache files
 models/                       Trained baseline and MTL checkpoints
 notebooks/                    Reproducible analysis notebooks
+  Legacy scripts/             Archived notebooks and utilities
 results/
   classification/             Protein-level training/evaluation metrics
+  insilico_mutagenesis/       Saturation mutagenesis tables and figures
+  paper_figures/              Main and supplementary paper figures
+  paper_tables/               Main and supplementary paper tables
   probing/
     rows/                     Per-protein residue-localization metrics
     summaries/                Bootstrap summaries and comparison tables
-  figures/
-    main/                     Main paper figures
-    supplementary/            Supplementary figures
-  insilico_mutagenesis/       Saturation mutagenesis tables and figures
+  legacy/                     Archived result outputs from earlier analyses
+Makefile                      Convenience commands
+pyproject.toml                Project metadata and dependencies
 replot_probe_figures.py       Figure replotting utility
+SETUP.md                      Additional setup notes
 src/xallergen/                Shared utilities
+uv.lock                       Locked dependency versions
 ```
 
 ## Environment
