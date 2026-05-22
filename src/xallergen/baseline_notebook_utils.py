@@ -5,6 +5,7 @@ import json
 import os
 import random
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -23,6 +24,15 @@ DROPOUT = 0.3
 THRESHOLD = 0.5
 IG_STEPS = 50
 MAX_SEQ_LEN = 1022
+NETSURFP_ID_COLUMN_CANDIDATES = ("id", "sequence_id", "name", "identifier")
+NETSURFP_INDEX_COLUMN_CANDIDATES = ("n", "position", "residue_index", "idx")
+NETSURFP_RSA_COLUMN_CANDIDATES = (
+    "rsa",
+    "rsasa",
+    "rel_sasa",
+    "relative_surface_accessibility",
+    "relative_solvent_accessibility",
+)
 
 
 def configure_matplotlib_cache(cwd: Path) -> None:
@@ -104,6 +114,143 @@ def cudnn_backward_safe_context(device: str):
 
 def build_tokenizer(model_name: str = HF_MODEL_NAME):
     return AutoTokenizer.from_pretrained(resolve_hf_model_source(model_name))
+
+
+def _normalize_netsurfp_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    normalized = frame.copy()
+    normalized.columns = [str(column).strip() for column in normalized.columns]
+    return normalized
+
+
+def _find_netsurfp_column(columns: list[str], candidates: tuple[str, ...]) -> str:
+    lowered = {str(column).strip().lower(): str(column).strip() for column in columns}
+    for candidate in candidates:
+        if candidate.lower() in lowered:
+            return lowered[candidate.lower()]
+    raise KeyError(
+        f"Could not find any of {candidates} in NetSurfP columns: {', '.join(map(str, columns))}"
+    )
+
+
+def inspect_netsurfp_csv(csv_path: Path, expected_ids: list[str] | None = None) -> dict[str, Any]:
+    frame = _normalize_netsurfp_columns(pd.read_csv(csv_path, skipinitialspace=True))
+    id_column = _find_netsurfp_column(list(frame.columns), NETSURFP_ID_COLUMN_CANDIDATES)
+    index_column = _find_netsurfp_column(list(frame.columns), NETSURFP_INDEX_COLUMN_CANDIDATES)
+    rsa_column = _find_netsurfp_column(list(frame.columns), NETSURFP_RSA_COLUMN_CANDIDATES)
+
+    raw_ids = frame[id_column].astype(str).str.strip()
+    normalized_ids = raw_ids.str.removeprefix(">")
+    rsa_values = pd.to_numeric(frame[rsa_column], errors="coerce")
+    if rsa_values.isna().any():
+        raise ValueError(f"Found non-numeric RSA values in {csv_path}")
+
+    unique_ids = pd.unique(normalized_ids)
+    info = {
+        "path": str(csv_path),
+        "columns": list(frame.columns),
+        "id_column": id_column,
+        "index_column": index_column,
+        "rsa_column": rsa_column,
+        "index_format": (
+            f"residue-level rows keyed by `{id_column}` with 1-based residue position column `{index_column}`"
+        ),
+        "id_has_leading_gt": bool(raw_ids.str.startswith(">").any()),
+        "n_sequences": int(len(unique_ids)),
+        "rsa_min": float(rsa_values.min()),
+        "rsa_max": float(rsa_values.max()),
+        "rsa_in_unit_interval": bool((rsa_values >= 0.0).all() and (rsa_values <= 1.0).all()),
+    }
+    if expected_ids is not None:
+        expected_id_set = {str(value).strip() for value in expected_ids}
+        observed_id_set = set(map(str, unique_ids))
+        info["expected_sequences"] = int(len(expected_id_set))
+        info["missing_sequences"] = int(len(expected_id_set - observed_id_set))
+        info["extra_sequences"] = int(len(observed_id_set - expected_id_set))
+        info["exact_id_match"] = observed_id_set == expected_id_set
+    return info
+
+
+def align_rsa_to_tokenization(
+    rsa_tensor: torch.Tensor,
+    add_special_tokens: bool,
+) -> torch.Tensor:
+    rsa_tensor = rsa_tensor.detach().to(dtype=torch.float32).clone()
+    rsa_tensor.requires_grad_(False)
+    if not add_special_tokens:
+        return rsa_tensor
+    aligned = torch.zeros(rsa_tensor.shape[0] + 2, dtype=torch.float32)
+    aligned[1:-1] = rsa_tensor
+    aligned.requires_grad_(False)
+    return aligned
+
+
+def load_netsurfp_rsa_mapping(
+    csv_path: Path,
+    expected_frame: pd.DataFrame,
+    add_special_tokens: bool = False,
+) -> tuple[dict[str, torch.Tensor | None], dict[str, Any]]:
+    frame = _normalize_netsurfp_columns(pd.read_csv(csv_path, skipinitialspace=True))
+    id_column = _find_netsurfp_column(list(frame.columns), NETSURFP_ID_COLUMN_CANDIDATES)
+    index_column = _find_netsurfp_column(list(frame.columns), NETSURFP_INDEX_COLUMN_CANDIDATES)
+    rsa_column = _find_netsurfp_column(list(frame.columns), NETSURFP_RSA_COLUMN_CANDIDATES)
+
+    frame[id_column] = frame[id_column].astype(str).str.strip().str.removeprefix(">")
+    frame[index_column] = pd.to_numeric(frame[index_column], errors="coerce")
+    frame[rsa_column] = pd.to_numeric(frame[rsa_column], errors="coerce")
+    if frame[index_column].isna().any():
+        raise ValueError(f"Found non-numeric residue positions in {csv_path}")
+    if frame[rsa_column].isna().any():
+        raise ValueError(f"Found non-numeric RSA values in {csv_path}")
+    if ((frame[rsa_column] < 0.0) | (frame[rsa_column] > 1.0)).any():
+        raise ValueError(f"Found RSA values outside [0, 1] in {csv_path}")
+
+    expected = expected_frame.copy()
+    expected["sequence_id"] = expected["sequence_id"].astype(str).str.strip()
+    expected["sequence"] = expected["sequence"].astype(str).str.strip().str.upper()
+    expected_lengths = {
+        row.sequence_id: len(row.sequence)
+        for row in expected[["sequence_id", "sequence"]].itertuples(index=False)
+    }
+    rsa_mapping: dict[str, torch.Tensor | None] = {
+        sequence_id: None for sequence_id in expected["sequence_id"].tolist()
+    }
+
+    grouped = frame.sort_values([id_column, index_column]).groupby(id_column, sort=False)
+    extra_ids = []
+    length_mismatches = []
+    for sequence_id, group in grouped:
+        if sequence_id not in expected_lengths:
+            extra_ids.append(sequence_id)
+            continue
+        rsa_values = torch.tensor(group[rsa_column].to_numpy(dtype=np.float32), dtype=torch.float32)
+        if rsa_values.shape[0] != expected_lengths[sequence_id]:
+            length_mismatches.append(
+                {
+                    "sequence_id": sequence_id,
+                    "expected_length": expected_lengths[sequence_id],
+                    "observed_length": int(rsa_values.shape[0]),
+                }
+            )
+            continue
+        rsa_mapping[sequence_id] = align_rsa_to_tokenization(rsa_values, add_special_tokens)
+
+    missing_ids = [sequence_id for sequence_id, value in rsa_mapping.items() if value is None]
+    summary = {
+        "path": str(csv_path),
+        "id_column": id_column,
+        "index_column": index_column,
+        "rsa_column": rsa_column,
+        "n_expected_sequences": len(expected_lengths),
+        "n_parsed_sequences": sum(value is not None for value in rsa_mapping.values()),
+        "n_missing_sequences": len(missing_ids),
+        "n_extra_sequences": len(extra_ids),
+        "n_length_mismatches": len(length_mismatches),
+        "missing_sequence_ids": missing_ids,
+        "extra_sequence_ids": extra_ids,
+        "length_mismatches": length_mismatches,
+        "add_special_tokens": add_special_tokens,
+    }
+    return rsa_mapping, summary
 
 
 class AttentionPooling(nn.Module):
