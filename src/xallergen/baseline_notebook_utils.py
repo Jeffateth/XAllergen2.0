@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import gzip
 import json
 import os
 import random
@@ -240,6 +241,101 @@ def load_netsurfp_rsa_mapping(
         "id_column": id_column,
         "index_column": index_column,
         "rsa_column": rsa_column,
+        "n_expected_sequences": len(expected_lengths),
+        "n_parsed_sequences": sum(value is not None for value in rsa_mapping.values()),
+        "n_missing_sequences": len(missing_ids),
+        "n_extra_sequences": len(extra_ids),
+        "n_length_mismatches": len(length_mismatches),
+        "missing_sequence_ids": missing_ids,
+        "extra_sequence_ids": extra_ids,
+        "length_mismatches": length_mismatches,
+        "add_special_tokens": add_special_tokens,
+    }
+    return rsa_mapping, summary
+
+
+def inspect_precomputed_rsa_file(
+    rsa_path: Path,
+    expected_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    opener = gzip.open if rsa_path.suffix == ".gz" else open
+    with opener(rsa_path, "rt", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object in {rsa_path}")
+
+    sequence_ids = list(payload.keys())
+    vector_lengths = [len(values) for values in payload.values()]
+    all_values = [float(value) for values in payload.values() for value in values]
+    info = {
+        "path": str(rsa_path),
+        "format": "precomputed_rsa_json",
+        "compressed": rsa_path.suffix == ".gz",
+        "n_sequences": len(sequence_ids),
+        "rsa_min": float(min(all_values)) if all_values else 0.0,
+        "rsa_max": float(max(all_values)) if all_values else 0.0,
+        "rsa_in_unit_interval": bool(all(0.0 <= value <= 1.0 for value in all_values)),
+        "min_length": int(min(vector_lengths)) if vector_lengths else 0,
+        "max_length": int(max(vector_lengths)) if vector_lengths else 0,
+    }
+    if expected_ids is not None:
+        expected_id_set = {str(value).strip() for value in expected_ids}
+        observed_id_set = set(map(str, sequence_ids))
+        info["expected_sequences"] = int(len(expected_id_set))
+        info["missing_sequences"] = int(len(expected_id_set - observed_id_set))
+        info["extra_sequences"] = int(len(observed_id_set - expected_id_set))
+        info["exact_id_match"] = observed_id_set == expected_id_set
+    return info
+
+
+def load_precomputed_rsa_mapping(
+    rsa_path: Path,
+    expected_frame: pd.DataFrame,
+    add_special_tokens: bool = False,
+) -> tuple[dict[str, torch.Tensor | None], dict[str, Any]]:
+    opener = gzip.open if rsa_path.suffix == ".gz" else open
+    with opener(rsa_path, "rt", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object in {rsa_path}")
+
+    expected = expected_frame.copy()
+    expected["sequence_id"] = expected["sequence_id"].astype(str).str.strip()
+    expected["sequence"] = expected["sequence"].astype(str).str.strip().str.upper()
+    expected_lengths = {
+        row.sequence_id: len(row.sequence)
+        for row in expected[["sequence_id", "sequence"]].itertuples(index=False)
+    }
+    rsa_mapping: dict[str, torch.Tensor | None] = {
+        sequence_id: None for sequence_id in expected["sequence_id"].tolist()
+    }
+
+    extra_ids = []
+    length_mismatches = []
+    for sequence_id, values in payload.items():
+        sequence_id = str(sequence_id).strip()
+        if sequence_id not in expected_lengths:
+            extra_ids.append(sequence_id)
+            continue
+        rsa_values = torch.tensor(np.asarray(values, dtype=np.float32), dtype=torch.float32)
+        if rsa_values.shape[0] != expected_lengths[sequence_id]:
+            length_mismatches.append(
+                {
+                    "sequence_id": sequence_id,
+                    "expected_length": expected_lengths[sequence_id],
+                    "observed_length": int(rsa_values.shape[0]),
+                }
+            )
+            continue
+        if ((rsa_values < 0.0) | (rsa_values > 1.0)).any():
+            raise ValueError(f"Found RSA values outside [0, 1] for {sequence_id} in {rsa_path}")
+        rsa_mapping[sequence_id] = align_rsa_to_tokenization(rsa_values, add_special_tokens)
+
+    missing_ids = [sequence_id for sequence_id, value in rsa_mapping.items() if value is None]
+    summary = {
+        "path": str(rsa_path),
+        "format": "precomputed_rsa_json",
+        "compressed": rsa_path.suffix == ".gz",
         "n_expected_sequences": len(expected_lengths),
         "n_parsed_sequences": sum(value is not None for value in rsa_mapping.values()),
         "n_missing_sequences": len(missing_ids),

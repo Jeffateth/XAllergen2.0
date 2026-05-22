@@ -31,9 +31,9 @@ from .baseline_notebook_utils import (
     THRESHOLD,
     FrozenESMAllergenClassifier,
     build_tokenizer,
-    inspect_netsurfp_csv,
+    inspect_precomputed_rsa_file,
     load_baseline_checkpoint,
-    load_netsurfp_rsa_mapping,
+    load_precomputed_rsa_mapping,
     seed_everything,
     prepare_baseline_probe_frame,
     run_baseline_probe_suite,
@@ -150,33 +150,39 @@ def build_dataloader(
     )
 
 
-def inspect_netsurfp_inputs(
-    train_csv: Path,
-    test_csv: Path,
+def inspect_rsa_inputs(
+    train_rsa_path: Path,
+    test_rsa_path: Path,
     train_frame: pd.DataFrame,
     test_frame: pd.DataFrame,
 ) -> pd.DataFrame:
     records = [
-        inspect_netsurfp_csv(train_csv, expected_ids=train_frame["sequence_id"].astype(str).str.strip().tolist()),
-        inspect_netsurfp_csv(test_csv, expected_ids=test_frame["sequence_id"].astype(str).str.strip().tolist()),
+        inspect_precomputed_rsa_file(
+            train_rsa_path,
+            expected_ids=train_frame["sequence_id"].astype(str).str.strip().tolist(),
+        ),
+        inspect_precomputed_rsa_file(
+            test_rsa_path,
+            expected_ids=test_frame["sequence_id"].astype(str).str.strip().tolist(),
+        ),
     ]
     return pd.DataFrame(records)
 
 
 def load_rsa_lookup_dicts(
-    train_netsurfp_csv: Path,
-    test_netsurfp_csv: Path,
+    train_rsa_path: Path,
+    test_rsa_path: Path,
     train_frame: pd.DataFrame,
     test_frame: pd.DataFrame,
     add_special_tokens: bool,
 ) -> tuple[dict[str, torch.Tensor | None], dict[str, torch.Tensor | None], dict[str, Any]]:
-    train_lookup, train_summary = load_netsurfp_rsa_mapping(
-        train_netsurfp_csv,
+    train_lookup, train_summary = load_precomputed_rsa_mapping(
+        train_rsa_path,
         expected_frame=train_frame,
         add_special_tokens=add_special_tokens,
     )
-    test_lookup, test_summary = load_netsurfp_rsa_mapping(
-        test_netsurfp_csv,
+    test_lookup, test_summary = load_precomputed_rsa_mapping(
+        test_rsa_path,
         expected_frame=test_frame,
         add_special_tokens=add_special_tokens,
     )

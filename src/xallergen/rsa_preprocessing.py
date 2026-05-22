@@ -12,13 +12,16 @@ import pandas as pd
 __all__ = [
     "DEFAULT_OUTPUT_DIR",
     "DEFAULT_OUTPUT_JSON",
+    "DEFAULT_TEST_OUTPUT_JSON",
     "DEFAULT_NETSURFP_MAX_SEQUENCES",
     "DEFAULT_TEST_CSV",
+    "DEFAULT_TRAIN_OUTPUT_JSON",
     "DEFAULT_TRAIN_CSV",
     "export_deepalgpro_for_rsa",
     "load_dataset",
     "load_expected_sequences",
     "parse_netsurfp_rsa",
+    "parse_split_netsurfp_rsa",
 ]
 
 REQUIRED_COLUMNS = ("sequence_id", "sequence", "label")
@@ -30,6 +33,8 @@ DEFAULT_NETSURFP_MAX_SEQUENCES = 5000
 DEFAULT_TRAIN_FASTA_BASENAME = "deepalgpro_train"
 DEFAULT_TEST_FASTA_NAME = "deepalgpro_test_for_netsurfp.fasta"
 DEFAULT_OUTPUT_JSON = Path("data/rsa/deepalgpro_rsa.json")
+DEFAULT_TRAIN_OUTPUT_JSON = Path("data/rsa/deepalgpro_train_rsa.json")
+DEFAULT_TEST_OUTPUT_JSON = Path("data/rsa/deepalgpro_test_rsa.json")
 TABLE_SUFFIXES = {".csv", ".tsv", ".txt"}
 ID_COLUMN_CANDIDATES = ("sequence_id", "id", "name", "seq_name", "identifier")
 RSA_COLUMN_CANDIDATES = (
@@ -361,4 +366,84 @@ def parse_netsurfp_rsa(
         "extra_rsa_entries": len(extra_ids),
         "length_mismatches": len(length_mismatches),
         "output_json": output_json,
+    }
+
+
+def parse_split_netsurfp_rsa(
+    train_netsurfp_csv: Path,
+    test_netsurfp_csv: Path,
+    train_csv: Path = DEFAULT_TRAIN_CSV,
+    test_csv: Path = DEFAULT_TEST_CSV,
+    train_output_json: Path = DEFAULT_TRAIN_OUTPUT_JSON,
+    test_output_json: Path = DEFAULT_TEST_OUTPUT_JSON,
+) -> dict[str, object]:
+    """Write split-specific RSA JSON files without merging train and test."""
+    train_expected = load_dataset(train_csv, "train")
+    test_expected = load_dataset(test_csv, "test")
+
+    train_ids = set(train_expected["sequence_id"])
+    test_ids = set(test_expected["sequence_id"])
+    if train_ids.intersection(test_ids):
+        preview = ", ".join(sorted(train_ids.intersection(test_ids))[:10])
+        raise ValueError(
+            "Train/test sequence_id overlap detected while preparing split RSA files: "
+            f"{preview}"
+        )
+
+    train_rsa = parse_table(train_netsurfp_csv)
+    test_rsa = parse_table(test_netsurfp_csv)
+
+    train_missing = sorted(train_ids - set(train_rsa))
+    train_extra = sorted(set(train_rsa) - train_ids)
+    test_missing = sorted(test_ids - set(test_rsa))
+    test_extra = sorted(set(test_rsa) - test_ids)
+
+    train_length_mismatches = sorted(
+        sequence_id
+        for sequence_id, values in train_rsa.items()
+        if sequence_id in train_ids
+        and len(values)
+        != int(
+            train_expected.loc[
+                train_expected["sequence_id"].eq(sequence_id), "sequence"
+            ].str.len().iloc[0]
+        )
+    )
+    test_length_mismatches = sorted(
+        sequence_id
+        for sequence_id, values in test_rsa.items()
+        if sequence_id in test_ids
+        and len(values)
+        != int(
+            test_expected.loc[
+                test_expected["sequence_id"].eq(sequence_id), "sequence"
+            ].str.len().iloc[0]
+        )
+    )
+
+    if train_missing or train_extra or train_length_mismatches:
+        raise ValueError(
+            "Train NetSurfP RSA validation failed: "
+            f"missing={len(train_missing)}, extra={len(train_extra)}, "
+            f"length_mismatches={len(train_length_mismatches)}"
+        )
+    if test_missing or test_extra or test_length_mismatches:
+        raise ValueError(
+            "Test NetSurfP RSA validation failed: "
+            f"missing={len(test_missing)}, extra={len(test_extra)}, "
+            f"length_mismatches={len(test_length_mismatches)}"
+        )
+
+    train_output_json.parent.mkdir(parents=True, exist_ok=True)
+    test_output_json.parent.mkdir(parents=True, exist_ok=True)
+    with train_output_json.open("w", encoding="utf-8") as handle:
+        json.dump(train_rsa, handle)
+    with test_output_json.open("w", encoding="utf-8") as handle:
+        json.dump(test_rsa, handle)
+
+    return {
+        "train_sequences": len(train_ids),
+        "test_sequences": len(test_ids),
+        "train_output_json": train_output_json,
+        "test_output_json": test_output_json,
     }

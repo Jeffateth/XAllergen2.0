@@ -11,3 +11,6 @@ outputs/
 external/
 notebooks/Legacy\ scripts/
 results/legacy/
+
+# Large NetSurfP outputs
+data/rsa/*_netsurfp.csv
