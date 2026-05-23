@@ -18,6 +18,8 @@ PAPER_TITLE_FONTSIZE = 13
 PAPER_LABEL_FONTSIZE = 11.5
 PAPER_TICK_FONTSIZE = 10.5
 PAPER_ANNOT_FONTSIZE = 10
+NON_EPITOPE_COLOR = "#4C72B0"
+EPITOPE_COLOR = "#C44E52"
 
 MIN_DELTA_P = 0.05
 MIN_TRANSITION_SUPPORT = 20
@@ -26,20 +28,13 @@ BOOTSTRAP_RANDOM_STATE = 42
 
 AA_ORDER = list("ACDEFGHIKLMNPQRSTVWY")
 
-PROPERTY_LABELS = {
-    "charge_negative": "Acidic",
-    "charge_positive": "Basic",
-    "polar_uncharged": "Polar uncharged",
-    "hydrophobic": "Nonpolar",
-    "special": "Small / conformationally special",
-}
-
 BAR_CLASS_COLORS = {
     "Acidic": "#d62728",
     "Basic": "#1f77b4",
     "Polar uncharged": "#2ca02c",
-    "Nonpolar": "#ffbf00",
-    "Small / conformationally special": "#9467bd",
+    "Hydrophobic nonpolar": "#ffbf00",
+    "Glycine": "#9467bd",
+    "Proline": "#8c564b",
 }
 
 CHARGE_POLARITY_CLASSES = {
@@ -52,25 +47,33 @@ CHARGE_POLARITY_CLASSES = {
     "T": "Polar uncharged",
     "N": "Polar uncharged",
     "Q": "Polar uncharged",
-    "C": "Polar uncharged",
     "Y": "Polar uncharged",
-    "A": "Nonpolar",
-    "V": "Nonpolar",
-    "L": "Nonpolar",
-    "I": "Nonpolar",
-    "M": "Nonpolar",
-    "F": "Nonpolar",
-    "W": "Nonpolar",
-    "G": "Small / conformationally special",
-    "P": "Small / conformationally special",
+    "C": "Polar uncharged",
+    "A": "Hydrophobic nonpolar",
+    "V": "Hydrophobic nonpolar",
+    "L": "Hydrophobic nonpolar",
+    "I": "Hydrophobic nonpolar",
+    "M": "Hydrophobic nonpolar",
+    "F": "Hydrophobic nonpolar",
+    "W": "Hydrophobic nonpolar",
+    "G": "Glycine",
+    "P": "Proline",
 }
+CHARGE_POLARITY_ORDER = [
+    "Acidic",
+    "Basic",
+    "Polar uncharged",
+    "Hydrophobic nonpolar",
+    "Glycine",
+    "Proline",
+]
 
 HYDROPHOBICITY_AROMATICITY_CLASSES = {
-    "A": "Strongly hydrophobic aliphatic",
-    "V": "Strongly hydrophobic aliphatic",
-    "L": "Strongly hydrophobic aliphatic",
-    "I": "Strongly hydrophobic aliphatic",
-    "M": "Strongly hydrophobic aliphatic",
+    "A": "Hydrophobic aliphatic",
+    "V": "Hydrophobic aliphatic",
+    "L": "Hydrophobic aliphatic",
+    "I": "Hydrophobic aliphatic",
+    "M": "Hydrophobic aliphatic",
     "F": "Aromatic",
     "W": "Aromatic",
     "Y": "Aromatic",
@@ -84,20 +87,29 @@ HYDROPHOBICITY_AROMATICITY_CLASSES = {
     "K": "Charged",
     "R": "Charged",
     "H": "Charged",
-    "G": "Small / conformationally special",
-    "P": "Small / conformationally special",
+    "G": "Glycine",
+    "P": "Proline",
 }
+HYDROPHOBICITY_AROMATICITY_ORDER = [
+    "Hydrophobic aliphatic",
+    "Aromatic",
+    "Polar / H-bonding",
+    "Charged",
+    "Glycine",
+    "Proline",
+]
 
 CLASS_LABELS_COMPACT = {
     "Acidic": "Acidic",
     "Basic": "Basic",
     "Polar uncharged": "Polar\nuncharged",
-    "Nonpolar": "Nonpolar",
-    "Strongly hydrophobic aliphatic": "Hydrophobic\naliphatic",
+    "Hydrophobic nonpolar": "Hydrophobic\nnonpolar",
+    "Hydrophobic aliphatic": "Hydrophobic\naliphatic",
     "Aromatic": "Aromatic",
     "Polar / H-bonding": "Polar /\nH-bonding",
     "Charged": "Charged",
-    "Small / conformationally special": "Small /\nconformational",
+    "Glycine": "Glycine",
+    "Proline": "Proline",
 }
 
 
@@ -138,6 +150,155 @@ def set_paper_plot_style() -> None:
             "ps.fonttype": 42,
         }
     )
+
+
+def _significance_marker(p_value: float) -> str:
+    if pd.isna(p_value):
+        return "NA"
+    if p_value < 0.001:
+        return "***"
+    if p_value < 0.01:
+        return "**"
+    if p_value < 0.05:
+        return "*"
+    return "ns"
+
+
+def replot_main_epitope_vs_non_epitope_mutagenesis(
+    per_protein_csv: Path,
+    summary_csv: Path,
+    output_dir: Path,
+) -> dict[str, Path]:
+    import matplotlib.pyplot as plt
+
+    per_protein_df = pd.read_csv(per_protein_csv)
+    summary_df = pd.read_csv(summary_csv)
+
+    metric = "mean_abs_delta_p"
+    non_epitope_values = per_protein_df[f"{metric}_non_epitope"].to_numpy(dtype=float)
+    epitope_values = per_protein_df[f"{metric}_epitope"].to_numpy(dtype=float)
+    p_two_sided = float(summary_df.loc[summary_df["metric"].eq(metric), "wilcoxon_p_two_sided"].iloc[0])
+
+    plt.rcParams.update(
+        {
+            "font.family": "sans-serif",
+            "font.size": 11,
+            "axes.labelsize": 11,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            "axes.linewidth": 0.8,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+            "legend.frameon": False,
+            "figure.dpi": 300,
+            "savefig.dpi": 300,
+        }
+    )
+
+    rng = np.random.default_rng(42)
+    x_positions = np.array([0.0, 1.0])
+    non_epitope_jitter = rng.uniform(-0.06, 0.06, size=len(non_epitope_values))
+    epitope_jitter = rng.uniform(-0.06, 0.06, size=len(epitope_values))
+
+    fig, ax = plt.subplots(figsize=(4.2, 3.4))
+    violin = ax.violinplot(
+        [non_epitope_values, epitope_values],
+        positions=x_positions,
+        widths=0.58,
+        showmeans=False,
+        showmedians=False,
+        showextrema=False,
+    )
+    for body, color in zip(violin["bodies"], [NON_EPITOPE_COLOR, EPITOPE_COLOR]):
+        body.set_facecolor(color)
+        body.set_edgecolor(color)
+        body.set_alpha(0.35)
+        body.set_linewidth(1.0)
+
+    for non_value, epi_value in zip(non_epitope_values, epitope_values):
+        ax.plot(
+            x_positions,
+            [non_value, epi_value],
+            color="lightgray",
+            linewidth=1.0,
+            alpha=0.85,
+            zorder=1,
+        )
+
+    ax.scatter(
+        np.full(len(non_epitope_values), x_positions[0]) + non_epitope_jitter,
+        non_epitope_values,
+        s=18,
+        color=NON_EPITOPE_COLOR,
+        alpha=0.90,
+        zorder=3,
+    )
+    ax.scatter(
+        np.full(len(epitope_values), x_positions[1]) + epitope_jitter,
+        epitope_values,
+        s=18,
+        color=EPITOPE_COLOR,
+        alpha=0.90,
+        zorder=3,
+    )
+
+    for xpos, values in zip(x_positions, [non_epitope_values, epitope_values]):
+        mean_value, ci_low, ci_high = bootstrap_ci_mean(values)
+        ax.errorbar(
+            [xpos],
+            [mean_value],
+            yerr=[[mean_value - ci_low], [ci_high - mean_value]],
+            fmt="o",
+            color="black",
+            markerfacecolor="black",
+            markeredgecolor="black",
+            markersize=4.8,
+            elinewidth=1.3,
+            capsize=3,
+            zorder=5,
+        )
+
+    all_values = np.concatenate([non_epitope_values, epitope_values])
+    data_min = float(np.nanmin(all_values))
+    data_max = float(np.nanmax(all_values))
+    y_range = max(data_max - data_min, 1e-6)
+    bracket_top = data_max + 0.05 * y_range
+    bracket_h = 0.035 * y_range
+    bracket_base = bracket_top - bracket_h
+    ax.plot(
+        [x_positions[0], x_positions[0], x_positions[1], x_positions[1]],
+        [bracket_base, bracket_top, bracket_top, bracket_base],
+        color="black",
+        linewidth=1.1,
+        clip_on=False,
+    )
+    ax.text(
+        0.5,
+        bracket_top + 0.01 * y_range,
+        _significance_marker(p_two_sided),
+        ha="center",
+        va="bottom",
+        fontsize=10,
+    )
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(["Non-epitope", "Epitope"])
+    for tick_label, color in zip(ax.get_xticklabels(), [NON_EPITOPE_COLOR, EPITOPE_COLOR]):
+        tick_label.set_color(color)
+    ax.set_ylabel("Mean |Δp| per residue")
+    ax.set_xlim(-0.45, 1.45)
+    ax.set_ylim(bottom=-0.002, top=bracket_top + 0.10 * y_range)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = output_dir / "main_epitope_vs_non_epitope_mutagenesis.pdf"
+    png_path = output_dir / "main_epitope_vs_non_epitope_mutagenesis.png"
+    fig.tight_layout(pad=0)
+    fig.savefig(pdf_path, dpi=300, bbox_inches="tight", pad_inches=0)
+    fig.savefig(png_path, dpi=300, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+    return {"pdf": pdf_path, "png": png_path}
 
 
 def _select_best_k_pct_from_sweep(frame: pd.DataFrame) -> float:
@@ -188,7 +349,7 @@ def _build_transition_dataframe(frame: pd.DataFrame) -> pd.DataFrame:
     df["original_aa"] = df["original_aa"].astype(str).str.upper()
     df["mutant_aa"] = df["mutant_aa"].astype(str).str.upper()
     df = df.loc[df["original_aa"].isin(AA_ORDER)].copy()
-    df["class"] = df["original_property"].map(PROPERTY_LABELS)
+    df["class"] = df["original_aa"].map(CHARGE_POLARITY_CLASSES)
     return df.loc[df["class"].notna()].copy()
 
 
@@ -282,7 +443,11 @@ def _summarize_top_supported_transitions(frame: pd.DataFrame, top_n: int = 10) -
     return summary_df.head(top_n).copy()
 
 
-def _build_normalized_transition_matrix(frame: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
+def _build_normalized_transition_matrix(
+    frame: pd.DataFrame,
+    mapping: dict[str, str],
+    class_order: list[str] | None = None,
+) -> pd.DataFrame:
     mapped = frame.copy()
     mapped["original_class"] = mapped["original_aa"].map(mapping)
     mapped["mutant_class"] = mapped["mutant_aa"].map(mapping)
@@ -293,8 +458,10 @@ def _build_normalized_transition_matrix(frame: pd.DataFrame, mapping: dict[str, 
         .mean()
         .pivot(index="original_class", columns="mutant_class", values="delta_p")
     )
-    row_order = sorted(matrix.index.tolist())
-    col_order = sorted(matrix.columns.tolist())
+    if class_order is None:
+        class_order = list(dict.fromkeys(mapping.values()))
+    row_order = list(class_order)
+    col_order = list(class_order)
     return matrix.reindex(index=row_order, columns=col_order).fillna(0.0)
 
 
@@ -446,7 +613,7 @@ def _plot_delta_p_distribution(ig_validation_sweep_df: pd.DataFrame, best_k_pct:
     best_k_all_df = ig_validation_sweep_df.loc[ig_validation_sweep_df["k_pct"] == best_k_pct].copy()
     median_delta_p = float(best_k_all_df["delta_p"].median())
     output_path = output_dir / "delta_p_distribution.png"
-    fig, ax = plt.subplots(figsize=(ICML_ONE_COLUMN_WIDTH, PAPER_SHORT_HEIGHT))
+    fig, ax = plt.subplots(figsize=(ICML_ONE_COLUMN_WIDTH, 2.4))
     ax.hist(best_k_all_df["delta_p"], bins=20, color="#4C72B0", alpha=0.85)
     ax.axvline(median_delta_p, color="black", linestyle="-", linewidth=1.5)
     ax.axvline(MIN_DELTA_P, color="#C44E52", linestyle="--", linewidth=1.5)
@@ -517,7 +684,11 @@ def _plot_transition_scatter(summary_df: pd.DataFrame, output_path: Path) -> Non
     y_pad = max(0.002, 0.20 * y_span)
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(float(df["plot_y"].min()) - y_pad, float(df["plot_y"].max()) + y_pad)
-    legend_handles = [Patch(color=color, label=label) for label, color in BAR_CLASS_COLORS.items() if label in set(df["class"])]
+    legend_handles = [
+        Patch(color=BAR_CLASS_COLORS[label], label=label)
+        for label in CHARGE_POLARITY_ORDER
+        if label in set(df["class"])
+    ]
     ax.legend(
         handles=legend_handles,
         title="Residue class",
@@ -538,8 +709,8 @@ def _plot_transition_scatter(summary_df: pd.DataFrame, output_path: Path) -> Non
         borderaxespad=0.2,
     )
     ax.spines[["top", "right"]].set_visible(False)
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight", dpi=300)
+    fig.tight_layout(pad=0.3)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
 
 
@@ -698,8 +869,16 @@ def render_insilico_mutagenesis_diagnostics(results_dir: Path) -> dict[str, obje
     _plot_top_supported_transitions(top_supported_transitions_df, ism_results_dir / "top10_supported_aa_transitions.png")
     _plot_supplementary_transition_heatmap(transition_df, ism_results_dir / "supplementary_transition_panel2_aa_heatmap.png")
 
-    charge_matrix = _build_normalized_transition_matrix(transition_df, CHARGE_POLARITY_CLASSES)
-    hydrophobicity_matrix = _build_normalized_transition_matrix(transition_df, HYDROPHOBICITY_AROMATICITY_CLASSES)
+    charge_matrix = _build_normalized_transition_matrix(
+        transition_df,
+        CHARGE_POLARITY_CLASSES,
+        CHARGE_POLARITY_ORDER,
+    )
+    hydrophobicity_matrix = _build_normalized_transition_matrix(
+        transition_df,
+        HYDROPHOBICITY_AROMATICITY_CLASSES,
+        HYDROPHOBICITY_AROMATICITY_ORDER,
+    )
     _plot_transition_class_heatmap(charge_matrix, ism_results_dir / "transition_panel3_charge_polarity_heatmap.png")
     _plot_transition_class_heatmap(hydrophobicity_matrix, ism_results_dir / "transition_panel3_hydrophobicity_heatmap.png")
 

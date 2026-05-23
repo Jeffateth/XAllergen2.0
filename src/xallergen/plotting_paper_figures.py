@@ -665,8 +665,6 @@ def plot_main_residue_alignment_subset(
     png_path: Path,
 ) -> None:
     import matplotlib.pyplot as plt
-    from matplotlib.lines import Line2D
-
     metric_keys = ["auroc", "auprc", "precision_at_k"]
     metric_labels = {
         "auroc": "AUROC",
@@ -725,45 +723,38 @@ def plot_main_residue_alignment_subset(
                 )
 
     ax.axvline(0.5, color="#7F7F7F", linestyle="--", linewidth=1.0, label="AUROC random baseline")
-    if not pd.isna(prevalence):
-        ax.axvline(
-            prevalence,
-            color="#B07AA1",
-            linestyle=":",
-            linewidth=1.0,
-            label="Residue prevalence baseline",
-        )
 
     ax.set_yticks(y_positions)
     ax.set_yticklabels(signal_order, fontsize=FONT_TICK)
-    ax.set_xlabel("Score", labelpad=2)
+    ax.set_xlabel("Score", labelpad=3)
     ax.set_xlim(x_min, x_max)
     ax.invert_yaxis()
     _style_axes(ax)
     handles, labels = ax.get_legend_handles_labels()
     handle_map = {label: handle for handle, label in zip(handles, labels)}
-    baseline_labels = ["AUROC random baseline", "Residue prevalence baseline"]
+    baseline_labels = ["AUROC random baseline"]
     metric_labels_ordered = ["AUROC", "AUPRC", "Precision@k"]
     baseline_handles = [handle_map[label] for label in baseline_labels if label in handle_map]
     baseline_text = [label for label in baseline_labels if label in handle_map]
     metric_handles = [handle_map[label] for label in metric_labels_ordered if label in handle_map]
     metric_text = [label for label in metric_labels_ordered if label in handle_map]
-    dummy_handle = Line2D([], [], linestyle="none", linewidth=0, alpha=0)
+    legend_handles = [*baseline_handles, *metric_handles]
+    legend_text = [*baseline_text, *metric_text]
     ax.legend(
-        [*baseline_handles, dummy_handle, *metric_handles],
-        [*baseline_text, "", *metric_text],
+        legend_handles,
+        legend_text,
         frameon=False,
         fontsize=FONT_LEGEND,
         loc="upper center",
-        bbox_to_anchor=(0.50, -0.30),
+        bbox_to_anchor=(0.50, -0.305),
         ncol=2,
         columnspacing=1.8,
         handletextpad=0.8,
         borderaxespad=0.0,
     )
-    fig.tight_layout(rect=(0.0, 0.26, 1.0, 1.0))
-    _safe_savefig(fig, pdf_path, bbox_inches="tight")
-    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
+    fig.tight_layout(rect=(0.0, 0.34, 1.0, 1.0), pad=0.3)
+    _safe_savefig(fig, pdf_path, dpi=300, bbox_inches="tight", pad_inches=0.02)
+    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
 
 
@@ -1360,7 +1351,7 @@ def plot_main_ig_masking_vs_random(
     p_value = float(wilcoxon_result.pvalue)
     significance_marker = _significance_marker(p_value)
 
-    fig, ax = plt.subplots(figsize=ONE_COLUMN_FIGSIZE)
+    fig, ax = plt.subplots(figsize=(3.35, 1.15))
     ax.plot(
         ig_summary_df["k_pct"],
         ig_summary_df["mean_delta_p"],
@@ -1449,13 +1440,13 @@ def plot_main_ig_masking_vs_random(
         frameon=False,
         fontsize=FONT_LEGEND,
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.40),
+        bbox_to_anchor=(0.5, -0.34),
         ncol=2,
         borderaxespad=0.0,
     )
-    fig.tight_layout(rect=(0.0, 0.18, 1.0, 1.0))
-    _safe_savefig(fig, pdf_path, bbox_inches="tight")
-    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight")
+    fig.tight_layout(rect=(0.0, 0.0, 0.0, 0.0), pad=0.0)
+    _safe_savefig(fig, pdf_path, dpi=300, bbox_inches="tight", pad_inches=0.02)
+    _safe_savefig(fig, png_path, dpi=300, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
     return {
         "best_k_pct": best_k_pct,
@@ -1516,7 +1507,9 @@ def render_main_mutagenesis_transition_figures(
 ) -> dict[str, Path]:
     from .plotting_insilico_mutagenesis import (
         CHARGE_POLARITY_CLASSES,
+        CHARGE_POLARITY_ORDER,
         HYDROPHOBICITY_AROMATICITY_CLASSES,
+        HYDROPHOBICITY_AROMATICITY_ORDER,
         _build_normalized_transition_matrix,
         _build_transition_dataframe,
         _plot_transition_class_heatmap,
@@ -1531,8 +1524,16 @@ def render_main_mutagenesis_transition_figures(
     annotated_df = pd.read_csv(annotated_csv)
     transition_df = _build_transition_dataframe(annotated_df)
     residue_summary_df = _summarize_transition_residues(transition_df)
-    charge_matrix = _build_normalized_transition_matrix(transition_df, CHARGE_POLARITY_CLASSES)
-    hydrophobicity_matrix = _build_normalized_transition_matrix(transition_df, HYDROPHOBICITY_AROMATICITY_CLASSES)
+    charge_matrix = _build_normalized_transition_matrix(
+        transition_df,
+        CHARGE_POLARITY_CLASSES,
+        CHARGE_POLARITY_ORDER,
+    )
+    hydrophobicity_matrix = _build_normalized_transition_matrix(
+        transition_df,
+        HYDROPHOBICITY_AROMATICITY_CLASSES,
+        HYDROPHOBICITY_AROMATICITY_ORDER,
+    )
 
     outputs = {
         "residue_scatter_pdf": Path(paper_figures_dir) / "main_transition_residue_scatter.pdf",
