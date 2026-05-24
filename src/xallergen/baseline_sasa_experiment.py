@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 import torch
@@ -41,6 +41,9 @@ from .baseline_notebook_utils import (
 from .mtl_epitope_notebook_utils import summarize_probe_methods
 
 
+RegularizationMode = Literal["rsa", "disorder", "ss3_coil"]
+
+
 @dataclass(frozen=True)
 class RSARegularizationConfig:
     batch_size: int = 24
@@ -56,6 +59,7 @@ class RSARegularizationConfig:
     dropout: float = DROPOUT
     threshold: float = THRESHOLD
     ig_steps: int = 50
+    feature_key: RegularizationMode = "rsa"
 
 
 class ProteinDataset(Dataset):
