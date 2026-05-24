@@ -18,13 +18,11 @@ __all__ = [
     "DEFAULT_TEST_CSV",
     "DEFAULT_TRAIN_OUTPUT_JSON",
     "DEFAULT_TRAIN_CSV",
-    "DEFAULT_TRAIN_DISORDER_JSON",
-    "DEFAULT_TEST_DISORDER_JSON",
     "DEFAULT_TRAIN_SS3_JSON",
     "DEFAULT_TEST_SS3_JSON",
+    "compute_rsa_ss3_structured_correlation",
     "export_deepalgpro_for_rsa",
-    "extract_disorder_lookup",
-    "extract_ss3_coil_lookup",
+    "extract_ss3_structured_lookup",
     "load_dataset",
     "load_expected_sequences",
     "parse_netsurfp_rsa",
@@ -51,12 +49,9 @@ RSA_COLUMN_CANDIDATES = (
     "relative_solvent_accessibility",
 )
 RESIDUE_COLUMN_CANDIDATES = ("residue", "aa", "seq", "sequence")
-DISORDER_COLUMN_CANDIDATES = ("disorder",)
 Q3_COLUMN_CANDIDATES = ("q3",)
-DEFAULT_TRAIN_DISORDER_JSON = Path("data/disorder/deepalgpro_train_disorder.json.gz")
-DEFAULT_TEST_DISORDER_JSON = Path("data/disorder/deepalgpro_test_disorder.json.gz")
-DEFAULT_TRAIN_SS3_JSON = Path("data/ss3/deepalgpro_train_ss3_coil.json.gz")
-DEFAULT_TEST_SS3_JSON = Path("data/ss3/deepalgpro_test_ss3_coil.json.gz")
+DEFAULT_TRAIN_SS3_JSON = Path("data/ss3/deepalgpro_train_ss3_structured.json.gz")
+DEFAULT_TEST_SS3_JSON = Path("data/ss3/deepalgpro_test_ss3_structured.json.gz")
 
 
 def _normalize_sequence_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -462,98 +457,19 @@ def parse_split_netsurfp_rsa(
     }
 
 
-def _parse_netsurfp_feature_column(
-    csv_path: Path,
-    value_column_candidates: tuple[str, ...],
-    feature_name: str,
-    expected_frame: pd.DataFrame,
-    output_json: Path,
-) -> dict[str, list[float]]:
-    """Shared helper: parse one per-residue feature column from a NetSurfP CSV."""
-    df = pd.read_csv(csv_path)
-    df.columns = [str(c).strip() for c in df.columns]
-
-    id_col = find_column(df.columns, ID_COLUMN_CANDIDATES)
-    val_col = find_column(df.columns, value_column_candidates)
-
-    if id_col is None or val_col is None:
-        available = ", ".join(df.columns)
-        raise ValueError(
-            f"Could not find required columns in {csv_path}. "
-            f"Need an ID column from {ID_COLUMN_CANDIDATES} and a '{feature_name}' "
-            f"column from {value_column_candidates}. Available: {available}"
-        )
-
-    df[id_col] = df[id_col].astype(str).str.strip().str.removeprefix(">")
-
-    frame = expected_frame.copy()
-    frame["sequence_id"] = frame["sequence_id"].astype(str).str.strip()
-    frame["sequence"] = frame["sequence"].astype(str).str.strip().str.upper()
-    expected_lengths: dict[str, int] = {
-        row.sequence_id: len(row.sequence)
-        for row in frame[["sequence_id", "sequence"]].itertuples(index=False)
-    }
-
-    lookup: dict[str, list[float]] = {}
-    for seq_id, group in df.groupby(id_col, sort=False):
-        seq_id = str(seq_id).strip()
-        if seq_id not in expected_lengths:
-            continue
-        lookup[seq_id] = pd.to_numeric(group[val_col], errors="coerce").astype(float).tolist()
-
-    missing = sorted(set(expected_lengths) - set(lookup))
-    length_mismatches = sorted(
-        seq_id for seq_id, vals in lookup.items()
-        if len(vals) != expected_lengths.get(seq_id, -1)
-    )
-
-    if missing:
-        preview = ", ".join(missing[:10])
-        raise ValueError(f"Missing {feature_name} entries for {len(missing)} sequences: {preview}")
-    if length_mismatches:
-        preview = ", ".join(length_mismatches[:10])
-        raise ValueError(
-            f"{feature_name} residue-count mismatch for {len(length_mismatches)} sequences: {preview}"
-        )
-
-    output_json.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(output_json, "wt", encoding="utf-8") as handle:
-        json.dump(lookup, handle)
-
-    return lookup
-
-
-def extract_disorder_lookup(
-    raw_netsurfp_path: Path,
-    frame: pd.DataFrame,
-    add_special_tokens: bool = False,  # noqa: ARG001 — reserved for API symmetry with RSA loaders
-    output_json: Path = DEFAULT_TRAIN_DISORDER_JSON,
-) -> dict[str, list[float]]:
-    """Parse per-residue disorder probability from a NetSurfP CSV and save as JSON.gz.
-
-    The `disorder` column contains values in [0, 1] (higher = more disordered).
-    `add_special_tokens` is accepted for API symmetry but not applied to the saved file;
-    alignment is handled at load time by `load_precomputed_rsa_mapping`.
-    """
-    return _parse_netsurfp_feature_column(
-        csv_path=raw_netsurfp_path,
-        value_column_candidates=DISORDER_COLUMN_CANDIDATES,
-        feature_name="disorder",
-        expected_frame=frame,
-        output_json=output_json,
-    )
-
-
-def extract_ss3_coil_lookup(
+def extract_ss3_structured_lookup(
     raw_netsurfp_path: Path,
     frame: pd.DataFrame,
     add_special_tokens: bool = False,  # noqa: ARG001 — reserved for API symmetry with RSA loaders
     output_json: Path = DEFAULT_TRAIN_SS3_JSON,
 ) -> dict[str, list[float]]:
-    """Parse per-residue SS3-coil indicator from a NetSurfP CSV and save as JSON.gz.
+    """Parse per-residue SS3-structured indicator from a NetSurfP CSV and save as JSON.gz.
 
-    Converts the `q3` column (H/E/C) to a binary float: 1.0 for coil/loop (C), 0.0 otherwise.
-    `add_special_tokens` is accepted for API symmetry but not applied to the saved file.
+    Converts the `q3` column (H/E/C) to a binary float: 1.0 for helix (H) or strand (E),
+    0.0 for coil/loop (C). With loss term (1 - f_i), this penalises attention on coil
+    residues and rewards attention on structured regions.
+    `add_special_tokens` is accepted for API symmetry but not applied to the saved file;
+    alignment is handled at load time by `load_precomputed_rsa_mapping`.
     """
     df = pd.read_csv(raw_netsurfp_path)
     df.columns = [str(c).strip() for c in df.columns]
@@ -585,7 +501,7 @@ def extract_ss3_coil_lookup(
         if seq_id not in expected_lengths:
             continue
         lookup[seq_id] = [
-            1.0 if str(v).strip().upper() == "C" else 0.0
+            1.0 if str(v).strip().upper() in {"H", "E"} else 0.0
             for v in group[q3_col].tolist()
         ]
 
@@ -597,11 +513,11 @@ def extract_ss3_coil_lookup(
 
     if missing:
         preview = ", ".join(missing[:10])
-        raise ValueError(f"Missing ss3_coil entries for {len(missing)} sequences: {preview}")
+        raise ValueError(f"Missing ss3_structured entries for {len(missing)} sequences: {preview}")
     if length_mismatches:
         preview = ", ".join(length_mismatches[:10])
         raise ValueError(
-            f"ss3_coil residue-count mismatch for {len(length_mismatches)} sequences: {preview}"
+            f"ss3_structured residue-count mismatch for {len(length_mismatches)} sequences: {preview}"
         )
 
     output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -609,3 +525,36 @@ def extract_ss3_coil_lookup(
         json.dump(lookup, handle)
 
     return lookup
+
+
+def compute_rsa_ss3_structured_correlation(
+    rsa_lookup: dict[str, list[float]],
+    ss3_structured_lookup: dict[str, list[float]],
+) -> float:
+    """Pearson r between RSA values and SS3-structured indicator, pooled across shared sequences.
+
+    Call this before running the SS3-structured sweep to assess whether the feature adds
+    independent signal over RSA. Low |r| suggests the two constraints are complementary;
+    high |r| suggests SS3-structured is largely redundant with RSA.
+    """
+    import numpy as np
+
+    common_ids = sorted(set(rsa_lookup) & set(ss3_structured_lookup))
+    if not common_ids:
+        raise ValueError("No shared sequence IDs between RSA and SS3-structured lookups.")
+
+    rsa_vals: list[float] = []
+    ss3_vals: list[float] = []
+    for seq_id in common_ids:
+        rsa_vals.extend(rsa_lookup[seq_id])
+        ss3_vals.extend(ss3_structured_lookup[seq_id])
+
+    r = float(np.corrcoef(
+        np.asarray(rsa_vals, dtype=np.float64),
+        np.asarray(ss3_vals, dtype=np.float64),
+    )[0, 1])
+    print(
+        f"RSA vs SS3-structured Pearson r = {r:.4f} "
+        f"(n = {len(rsa_vals):,} residues, {len(common_ids):,} sequences)"
+    )
+    return r
