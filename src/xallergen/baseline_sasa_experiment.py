@@ -41,7 +41,7 @@ from .baseline_notebook_utils import (
 from .mtl_epitope_notebook_utils import summarize_probe_methods
 
 
-RegularizationMode = Literal["rsa", "ss3_structured"]
+RegularizationMode = Literal["rsa", "ss3_structured", "disorder"]
 
 
 @dataclass(frozen=True)
