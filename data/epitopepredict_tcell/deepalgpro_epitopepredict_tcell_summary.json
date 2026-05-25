@@ -1,0 +1,37 @@
+{
+  "predictor": "epitopepredict_tepitope",
+  "label_filter": "allergenic_only",
+  "epitope_length": 15,
+  "binder_cutoff": 0.95,
+  "promiscuous_n": 2,
+  "alleles": [
+    "HLA-DRB1*01:01",
+    "HLA-DRB1*03:01",
+    "HLA-DRB1*04:01",
+    "HLA-DRB1*07:01",
+    "HLA-DRB1*11:01",
+    "HLA-DRB1*13:01",
+    "HLA-DRB1*15:01"
+  ],
+  "manifest_csv": "data/epitopepredict_tcell/deepalgpro_epitopepredict_tcell_manifest.csv",
+  "train": {
+    "total_sequences": 2723,
+    "sequence_length_summary": "min=11, median=168.0, mean=228.4, max=999",
+    "raw_prediction_rows": 4087832,
+    "binder_rows": 388127,
+    "promiscuous_binder_rows": 11864,
+    "raw_predictions_path": "data/epitopepredict_tcell/deepalgpro_train_tepitope_raw_predictions.csv.gz",
+    "binders_path": "data/epitopepredict_tcell/deepalgpro_train_tepitope_binders.csv.gz",
+    "promiscuous_binders_path": "data/epitopepredict_tcell/deepalgpro_train_tepitope_promiscuous_binders.csv.gz"
+  },
+  "test": {
+    "total_sequences": 672,
+    "sequence_length_summary": "min=11, median=179.0, mean=241.8, max=875",
+    "raw_prediction_rows": 1071546,
+    "binder_rows": 101860,
+    "promiscuous_binder_rows": 3952,
+    "raw_predictions_path": "data/epitopepredict_tcell/deepalgpro_test_tepitope_raw_predictions.csv.gz",
+    "binders_path": "data/epitopepredict_tcell/deepalgpro_test_tepitope_binders.csv.gz",
+    "promiscuous_binders_path": "data/epitopepredict_tcell/deepalgpro_test_tepitope_promiscuous_binders.csv.gz"
+  }
+}
