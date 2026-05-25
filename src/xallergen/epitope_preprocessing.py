@@ -1,24 +1,25 @@
-"""Convert epitopepredict T-cell prediction outputs to per-residue feature lookup dicts.
+"""Per-residue epitope feature lookup builders for attention regularization.
 
 Per-residue epitope score  e_i ∈ [0, 1]  used in the attention regularization loss:
 
     L = λ_cls · L_cls  +  λ_reg · 1[y=1] · (1/L) · Σ_i α_i (1 - e_i)
 
-Two modes
----------
-score
-    Max-pool raw TEpitope log-odds scores across all overlapping 15-mer peptides
-    and all HLA-DR alleles.  Negative scores are clipped to 0 (below-threshold
-    binders treated the same as uncovered positions).  The resulting vector is
-    min-max normalized *per protein* to [0, 1].
+Two data sources are supported:
 
-binder
-    Binary.  A residue is marked 1 if it is covered by at least one peptide
-    whose ``rank`` column satisfies  rank <= rank_threshold  (for any allele).
-    Default threshold: 10  (top-10 ranked binders per allele).
+TEpitope predictions  (build_epitope_residue_lookup / load_epitope_lookup_dicts)
+    Computational MHC-II binding predictions from epitopepredict over 7 HLA-DR alleles.
+    Two sub-modes:
+      score  — max-pool raw log-odds across alleles/windows, clip negatives to 0,
+               per-protein min-max normalize to [0, 1].
+      binder — binary; 1 where covered by a peptide with rank ≤ threshold.
 
-Column conventions (raw_predictions / binders files)
------------------------------------------------------
+IEDB experimental annotations  (build_iedb_residue_lookup)
+    Experimentally validated epitope intervals from the IEDB positives_splitA/B CSVs.
+    Binary: e_i = 1 for any residue covered by at least one annotated epitope interval,
+    0 otherwise.  Intervals are stored as semicolon-separated 1-based inclusive positions.
+
+Column conventions (TEpitope raw_predictions / binders files)
+-------------------------------------------------------------
 allele   : HLA allele string
 name     : protein sequence_id  (same as in train/test CSV)
 peptide  : 15-mer sequence
@@ -85,7 +86,10 @@ def _max_pool_score(
     vec = np.where(np.isfinite(vec), vec, 0.0)
     # Clip negatives: below-threshold binders treated like non-covered positions
     vec = np.maximum(vec, 0.0)
-    # Per-protein min-max normalize to [0, 1]
+    # Per-protein normalization: goal is residue-level alignment within each allergen,
+    # not cross-protein immunogenicity weighting (that is already handled by L_cls).
+    # Global normalization would confound protein-level binding strength with the
+    # residue-level regularization signal.
     max_val = float(vec.max())
     if max_val > 0.0:
         vec = vec / max_val
@@ -277,3 +281,69 @@ def inspect_epitope_inputs(
             "rank_threshold":    rank_threshold if mode == "binder" else None,
         })
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# IEDB experimental epitope lookup
+# ---------------------------------------------------------------------------
+
+def build_iedb_residue_lookup(
+    positives_csv: Path,
+    frame: pd.DataFrame,
+    sequence_id_col: str = "sequence_id",
+    add_special_tokens: bool = False,
+) -> dict[str, torch.Tensor | None]:
+    """Build a binary per-residue IEDB epitope lookup from a positives split CSV.
+
+    Parameters
+    ----------
+    positives_csv:
+        Path to ``positives_splitA.csv`` or ``positives_splitB.csv``.
+        Expected columns: ``accession`` (used as key), ``epitope_start``,
+        ``epitope_end`` (both semicolon-separated, 1-based inclusive).
+    frame:
+        Mixed train or test DataFrame with columns [sequence_id_col, sequence, label].
+        Allergen sequence_ids must equal the ``accession`` values in positives_csv.
+    sequence_id_col:
+        Column in ``frame`` whose values are matched against ``accession``.
+    add_special_tokens:
+        Prepend/append a zero for BOS/EOS tokens (must match tokenizer setting).
+
+    Returns
+    -------
+    dict mapping sequence_id → Tensor of shape (L,) for annotated allergens,
+    ``None`` for all other proteins (excluded from the regularization loss).
+    """
+    pos_df = pd.read_csv(positives_csv)
+    lookup: dict[str, torch.Tensor | None] = {
+        str(sid): None for sid in frame[sequence_id_col]
+    }
+
+    for _, row in pos_df.iterrows():
+        sid = str(row["accession"]).strip()
+        if sid not in lookup:
+            continue
+        seq = str(row["sequence"]).strip().upper()
+        L = len(seq)
+        vec = np.zeros(L, dtype=np.float32)
+
+        starts = [int(s) for s in str(row["epitope_start"]).split(";")]
+        ends   = [int(e) for e in str(row["epitope_end"]).split(";")]
+        for s1, e1 in zip(starts, ends):
+            # 1-based inclusive → 0-based half-open: [s1-1 : e1]
+            s0 = max(0, s1 - 1)
+            e0 = min(e1, L)
+            vec[s0:e0] = 1.0
+
+        if add_special_tokens:
+            vec = _pad_special_tokens(vec)
+
+        expected_len = L + (2 if add_special_tokens else 0)
+        if vec.shape[0] != expected_len:
+            raise ValueError(
+                f"IEDB vector length mismatch for {sid}: "
+                f"got {vec.shape[0]}, expected {expected_len}"
+            )
+        lookup[sid] = torch.tensor(vec, dtype=torch.float32)
+
+    return lookup

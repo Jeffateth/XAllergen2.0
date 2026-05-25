@@ -41,7 +41,7 @@ from .baseline_notebook_utils import (
 from .mtl_epitope_notebook_utils import summarize_probe_methods
 
 
-RegularizationMode = Literal["rsa", "ss3_structured", "disorder", "epitope"]
+RegularizationMode = Literal["rsa", "ss3_structured", "disorder", "epitope", "iedb"]
 
 
 @dataclass(frozen=True)
@@ -368,6 +368,7 @@ def train_single_lambda_run(
     device: str,
     checkpoint_path: Path,
     model_name: str = HF_MODEL_NAME,
+    baseline_checkpoint_path: Path | None = None,
 ) -> dict[str, Any]:
     seed_everything(RANDOM_STATE)
     model = FrozenESMAllergenClassifier(
@@ -375,6 +376,9 @@ def train_single_lambda_run(
         hidden_dim=config.hidden_dim,
         dropout=config.dropout,
     ).to(device)
+    if baseline_checkpoint_path is not None:
+        ckpt = torch.load(baseline_checkpoint_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"], strict=False)
     assert not any(param.requires_grad for param in model.backbone.parameters())
     trainable_params = [param for param in model.parameters() if param.requires_grad]
     optimizer = torch.optim.AdamW(
@@ -532,6 +536,7 @@ def run_lambda_rsa_sweep(
     output_dir: Path,
     device: str,
     model_name: str = HF_MODEL_NAME,
+    baseline_checkpoint_path: Path | None = None,
 ) -> pd.DataFrame:
     tokenizer = build_tokenizer(model_name)
     train_loader = build_dataloader(
@@ -578,6 +583,7 @@ def run_lambda_rsa_sweep(
             device=device,
             checkpoint_path=checkpoint_path,
             model_name=model_name,
+            baseline_checkpoint_path=baseline_checkpoint_path,
         )
 
         model, checkpoint = load_baseline_checkpoint(
