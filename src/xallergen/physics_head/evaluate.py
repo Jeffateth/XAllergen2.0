@@ -178,14 +178,17 @@ def main(
     """
     seed_everything(seed)
 
-    ckpt_path = Path(checkpoint_path or _DEFAULT_CKPT)
-    scaler_file = Path(scaler_path or _DEFAULT_SCALER)
-    test_netsurfp = Path(test_netsurfp_path or _DEFAULT_TEST_NETSURFP)
-    iedb_netsurfp = Path(iedb_netsurfp_path or _DEFAULT_IEDB_NETSURFP)
-    test_csv = Path(test_csv_path or _DEFAULT_TEST_CSV)
-    splitb_csv = Path(splitb_csv_path or _DEFAULT_SPLITB_CSV)
     out_dir = Path(output_dir or _DEFAULT_OUTPUT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Derive scaler and checkpoint from out_dir when not given explicitly,
+    # so Colab (Drive-backed out_dir) and local both resolve correctly.
+    ckpt_path   = Path(checkpoint_path or out_dir / "checkpoints" / "best.pt")
+    scaler_file = Path(scaler_path     or out_dir / "physics_scaler.json")
+    test_netsurfp = Path(test_netsurfp_path or _DEFAULT_TEST_NETSURFP)
+    iedb_netsurfp = Path(iedb_netsurfp_path or _DEFAULT_IEDB_NETSURFP)
+    test_csv   = Path(test_csv_path   or _DEFAULT_TEST_CSV)
+    splitb_csv = Path(splitb_csv_path or _DEFAULT_SPLITB_CSV)
 
     if device is None:
         if torch.cuda.is_available():
